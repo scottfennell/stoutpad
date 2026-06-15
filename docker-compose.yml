@@ -1,0 +1,37 @@
+services:
+  # External Postgres from the app's perspective. Stout connects via
+  # DATABASE_URL, creates/uses a dedicated `stout` database, and enables the
+  # `vector` extension itself. Image ships pgvector so the extension can load.
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: stout
+      POSTGRES_PASSWORD: stout
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stout"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://stout:stout@postgres:5432/postgres
+      STOUT_DB_NAME: stout
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+    volumes:
+      - stout-data:/data
+
+volumes:
+  postgres-data:
+  stout-data:

@@ -1,0 +1,21 @@
+{
+  "name": "@stout/electron",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsup src/main.ts --format esm --clean --external electron",
+    "start": "electron .",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@stout/core": "workspace:*"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "@types/node": "^22.10.5"
+  }
+}
