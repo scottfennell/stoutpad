@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { readNote, readNoteTree, writeNote } from "@stout/core";
+import { createNote, moveNote, readNote, readNoteTree, renameNote, writeNote } from "@stout/core";
 import {
   ensureWorkspaceRepo,
   loadRepoPaths,
@@ -396,6 +396,131 @@ describe("NodeGitEngine wip-branch lifecycle (autosave + squash)", () => {
       "--format=%(refname)",
     ]);
     expect(after.stdout).not.toContain("wip/");
+  });
+});
+
+describe("NodeGitEngine note mutations (create / rename / move)", () => {
+  async function notePaths(dir: string): Promise<string[]> {
+    const engine = new NodeGitEngine(dir);
+    return (await engine.listNoteFiles()).map((f) => f.path).sort();
+  }
+
+  /** Commit subjects on a ref, newest first. */
+  async function subjects(dir: string, ref: string): Promise<string[]> {
+    const { stdout } = await run("git", ["-C", dir, "log", "--format=%s", ref]);
+    return stdout.split("\n").filter((line) => line.length > 0);
+  }
+
+  it("creates a new leaf note and commits it to main", async () => {
+    await ensureWorkspaceRepo(paths);
+    const engine = new NodeGitEngine(paths.cloneDir);
+    const before = (await subjects(paths.cloneDir, "main")).length;
+
+    const res = await createNote(engine, "", "My Ideas");
+
+    expect(res).toEqual({ path: "my-ideas", file: "my-ideas.md" });
+    expect(await notePaths(paths.cloneDir)).toEqual(["_index.md", "my-ideas.md"]);
+    expect((await readNote(engine, "my-ideas"))?.markdown).toBe("# My Ideas\n");
+    const mainSubjects = await subjects(paths.cloneDir, "main");
+    expect(mainSubjects.length).toBe(before + 1);
+    expect(mainSubjects[0]).toBe("Create note my-ideas");
+  });
+
+  it("promotes a leaf parent to a directory on its first child (git mv)", async () => {
+    await ensureWorkspaceRepo(paths);
+    const engine = new NodeGitEngine(paths.cloneDir);
+    await writeNote(engine, "projects", "# Projects\n\nMy work.\n");
+
+    await createNote(engine, "projects", "First Idea");
+
+    // `projects.md` became `projects/_index.md` (content preserved) and the new
+    // child lives beside it; the parent keeps its `projects` identity.
+    expect(await notePaths(paths.cloneDir)).toEqual([
+      "_index.md",
+      "projects/_index.md",
+      "projects/first-idea.md",
+    ]);
+    expect((await readNote(engine, "projects"))?.markdown).toBe(
+      "# Projects\n\nMy work.\n",
+    );
+    const { root } = await readNoteTree(engine);
+    const projects = root.children.find((c) => c.path === "projects");
+    expect(projects).toMatchObject({ kind: "parent", file: "projects/_index.md" });
+    expect(projects?.children.map((c) => c.path)).toEqual(["projects/first-idea"]);
+  });
+
+  it("renames a parent note by moving its whole subtree as one commit", async () => {
+    await ensureWorkspaceRepo(paths);
+    await commitNote(paths.cloneDir, "projects/_index.md", "# Projects\n");
+    await commitNote(paths.cloneDir, "projects/ideas.md", "# Ideas\n");
+    await commitNote(paths.cloneDir, "projects/sub/_index.md", "# Sub\n");
+    await commitNote(paths.cloneDir, "projects/sub/deep.md", "# Deep\n");
+    const engine = new NodeGitEngine(paths.cloneDir);
+
+    const res = await renameNote(engine, "projects", "Work");
+
+    expect(res).toMatchObject({ path: "work", file: "work/_index.md" });
+    expect(await notePaths(paths.cloneDir)).toEqual([
+      "_index.md",
+      "work/_index.md",
+      "work/ideas.md",
+      "work/sub/_index.md",
+      "work/sub/deep.md",
+    ]);
+    expect((await readNote(engine, "work/sub/deep"))?.markdown).toBe("# Deep\n");
+    // One commit on main for the whole subtree move.
+    expect((await subjects(paths.cloneDir, "main"))[0]).toBe(
+      "Rename note projects to work",
+    );
+  });
+
+  it("moves a leaf under another parent, collapsing the emptied source parent", async () => {
+    await ensureWorkspaceRepo(paths);
+    await commitNote(paths.cloneDir, "a/_index.md", "# A\n");
+    await commitNote(paths.cloneDir, "a/only.md", "# Only\n");
+    await commitNote(paths.cloneDir, "b/_index.md", "# B\n");
+    const engine = new NodeGitEngine(paths.cloneDir);
+
+    const res = await moveNote(engine, "a/only", "b");
+
+    expect(res).toEqual({ path: "b/only", file: "b/only.md" });
+    // `only` moved under `b`; `a` lost its last child and collapsed to `a.md`.
+    expect(await notePaths(paths.cloneDir)).toEqual([
+      "_index.md",
+      "a.md",
+      "b/_index.md",
+      "b/only.md",
+    ]);
+    expect((await readNote(engine, "a"))?.markdown).toBe("# A\n");
+    expect((await readNote(engine, "b/only"))?.markdown).toBe("# Only\n");
+  });
+
+  it("rejects an invalid mutation (move into own subtree) without committing", async () => {
+    await ensureWorkspaceRepo(paths);
+    await commitNote(paths.cloneDir, "a/_index.md", "# A\n");
+    await commitNote(paths.cloneDir, "a/b.md", "# B\n");
+    const engine = new NodeGitEngine(paths.cloneDir);
+    const before = (await subjects(paths.cloneDir, "main")).length;
+
+    await expect(moveNote(engine, "a", "a/b")).rejects.toThrow(/subtree/u);
+    expect((await subjects(paths.cloneDir, "main")).length).toBe(before);
+  });
+
+  it("never publishes a mutation's commit beyond the clone (no push)", async () => {
+    await ensureWorkspaceRepo(paths);
+    const engine = new NodeGitEngine(paths.cloneDir);
+
+    await createNote(engine, "", "Solo");
+
+    // The new note lives on the clone's main but was never pushed to the bare repo.
+    const { stdout } = await run("git", [
+      "-C",
+      paths.bareDir,
+      "ls-tree",
+      "--name-only",
+      "main",
+    ]);
+    expect(stdout.split("\n")).not.toContain("solo.md");
   });
 });
 

@@ -12,6 +12,7 @@ import {
 } from "@stout/core";
 import { TipTapEditor } from "./TipTapEditor.js";
 import { createHttpWipEngine } from "./sync-client.js";
+import { postNoteCreate, postNoteMove, postNoteRename } from "./mutation-client.js";
 import type { EditorComponent } from "./editor.js";
 
 type Fetched =
@@ -52,7 +53,14 @@ type TreeFetched =
   | { state: "error"; message: string }
   | { state: "ready"; tree: NoteTreeResponse };
 
-export function useTree(fetchImpl: typeof fetch = fetch): TreeFetched {
+/**
+ * Fetch the unified note tree. `reloadToken` is an opaque value the caller bumps
+ * to force a refetch after a mutation (create / rename / move) reshapes the tree.
+ */
+export function useTree(
+  fetchImpl: typeof fetch = fetch,
+  reloadToken: number = 0,
+): TreeFetched {
   const [result, setResult] = useState<TreeFetched>({ state: "loading" });
 
   useEffect(() => {
@@ -75,7 +83,7 @@ export function useTree(fetchImpl: typeof fetch = fetch): TreeFetched {
     return () => {
       active = false;
     };
-  }, [fetchImpl]);
+  }, [fetchImpl, reloadToken]);
 
   return result;
 }
@@ -203,37 +211,87 @@ export function useNoteSync(
   );
 }
 
+/** A note-tree mutation requested from a node's affordances. */
+type TreeMutation = "create" | "rename" | "move";
+
+const ACTION_BUTTON_STYLE = {
+  appearance: "none",
+  background: "transparent",
+  border: "none",
+  color: "#9aa0a3",
+  cursor: "pointer",
+  font: "inherit",
+  fontSize: "0.8em",
+  padding: "0 0.25rem",
+} as const;
+
 function NoteTreeItem({
   node,
   selectedPath,
   onSelect,
+  onMutate,
 }: {
   node: NoteNode;
   selectedPath: string | null;
   onSelect: (path: string) => void;
+  onMutate: (kind: TreeMutation, node: NoteNode) => void;
 }) {
   const isSelected = selectedPath === node.path;
+  const isRoot = node.path === "";
   return (
     <li>
-      <button
-        type="button"
-        data-testid="note-title"
-        aria-current={isSelected ? "true" : undefined}
-        onClick={() => onSelect(node.path)}
-        style={{
-          appearance: "none",
-          background: isSelected ? "#2b2f31" : "transparent",
-          border: "none",
-          color: "inherit",
-          cursor: "pointer",
-          font: "inherit",
-          padding: "0.15rem 0.35rem",
-          textAlign: "left",
-          width: "100%",
-        }}
-      >
-        {node.title}
-      </button>
+      <span style={{ display: "flex", alignItems: "center", gap: "0.15rem" }}>
+        <button
+          type="button"
+          data-testid="note-title"
+          aria-current={isSelected ? "true" : undefined}
+          onClick={() => onSelect(node.path)}
+          style={{
+            appearance: "none",
+            background: isSelected ? "#2b2f31" : "transparent",
+            border: "none",
+            color: "inherit",
+            cursor: "pointer",
+            font: "inherit",
+            flex: 1,
+            padding: "0.15rem 0.35rem",
+            textAlign: "left",
+          }}
+        >
+          {node.title}
+        </button>
+        <button
+          type="button"
+          aria-label={`New note under ${node.title}`}
+          title="New child note"
+          onClick={() => onMutate("create", node)}
+          style={ACTION_BUTTON_STYLE}
+        >
+          +
+        </button>
+        {!isRoot && (
+          <>
+            <button
+              type="button"
+              aria-label={`Rename ${node.title}`}
+              title="Rename note"
+              onClick={() => onMutate("rename", node)}
+              style={ACTION_BUTTON_STYLE}
+            >
+              ✎
+            </button>
+            <button
+              type="button"
+              aria-label={`Move ${node.title}`}
+              title="Move note"
+              onClick={() => onMutate("move", node)}
+              style={ACTION_BUTTON_STYLE}
+            >
+              ⇄
+            </button>
+          </>
+        )}
+      </span>
       {node.children.length > 0 && (
         <ul style={{ listStyle: "none", margin: 0, paddingLeft: "1rem" }}>
           {node.children.map((child) => (
@@ -242,6 +300,7 @@ function NoteTreeItem({
               node={child}
               selectedPath={selectedPath}
               onSelect={onSelect}
+              onMutate={onMutate}
             />
           ))}
         </ul>
@@ -257,7 +316,43 @@ function NavPanel({
   selectedPath: string | null;
   onSelect: (path: string) => void;
 }) {
-  const result = useTree();
+  // Bumping the token refetches the tree after a mutation reshapes it.
+  const [reloadToken, setReloadToken] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  const result = useTree(fetch, reloadToken);
+
+  const handleMutate = useCallback(
+    (kind: TreeMutation, node: NoteNode) => {
+      const run = async (): Promise<void> => {
+        if (kind === "create") {
+          const name = window.prompt(`New note under "${node.title || "Home"}"`);
+          if (name === null || name.trim() === "") return;
+          return select(await postNoteCreate(node.path, name));
+        }
+        if (kind === "rename") {
+          const name = window.prompt(`Rename "${node.title}" to`, node.title);
+          if (name === null || name.trim() === "") return;
+          return select(await postNoteRename(node.path, name));
+        }
+        const parent = window.prompt(
+          `Move "${node.title}" under which note? (blank = Home)`,
+        );
+        if (parent === null) return;
+        return select(await postNoteMove(node.path, parent.trim()));
+      };
+      // Reselect the affected note and refetch the (reshaped) tree on success;
+      // surface a rejected mutation (duplicate/invalid name, illegal move) inline.
+      const select = (res: { path: string }): void => {
+        setError(null);
+        onSelect(res.path);
+        setReloadToken((token) => token + 1);
+      };
+      run().catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : String(err));
+      });
+    },
+    [onSelect],
+  );
 
   return (
     <nav
@@ -273,6 +368,11 @@ function NavPanel({
       <h2 style={{ fontSize: "0.75rem", letterSpacing: "0.05em", textTransform: "uppercase" }}>
         Notes
       </h2>
+      {error !== null && (
+        <p role="alert" style={{ color: "#e6a3a3" }}>
+          {error}
+        </p>
+      )}
       {result.state === "loading" && <p>Loading notes…</p>}
       {result.state === "error" && (
         <p role="alert">Could not load notes: {result.message}</p>
@@ -283,6 +383,7 @@ function NavPanel({
             node={result.tree.root}
             selectedPath={selectedPath}
             onSelect={onSelect}
+            onMutate={handleMutate}
           />
         </ul>
       )}

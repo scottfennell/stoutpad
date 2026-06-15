@@ -10,7 +10,10 @@ import { App } from "./App.js";
 import type { EditorComponent } from "./editor.js";
 import {
   HEALTH_PATH,
+  NOTE_CREATE_PATH,
+  NOTE_MOVE_PATH,
   NOTE_PATH,
+  NOTE_RENAME_PATH,
   SYNC_PATH,
   TREE_PATH,
   type HealthStatus,
@@ -19,7 +22,10 @@ import {
   type NoteTreeResponse,
 } from "@stout/core";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 const health: HealthStatus = {
   status: "ok",
@@ -229,3 +235,180 @@ function syncBodies(): Array<{ path: string; action: string; markdown?: string }
     )
     .map(([, init]) => JSON.parse((init as RequestInit).body as string));
 }
+
+/**
+ * Stub `fetch` with per-route status + body control, so a rejected mutation can
+ * return a 400 `{ error }`. Routes are keyed by URL (the mutation paths are all
+ * distinct), defaulting to status 200.
+ */
+function stubRoutes(
+  routes: Record<string, { status?: number; body: unknown }>,
+): void {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const route = routes[url];
+      if (route === undefined) return new Response("not found", { status: 404 });
+      return new Response(JSON.stringify(route.body), { status: route.status ?? 200 });
+    }),
+  );
+}
+
+/** Parsed bodies of every POST to `url`, in order. */
+function postBodies(url: string): Array<Record<string, unknown>> {
+  return vi
+    .mocked(fetch)
+    .mock.calls.filter(
+      ([u, init]) => u === url && (init as RequestInit | undefined)?.method === "POST",
+    )
+    .map(([, init]) => JSON.parse((init as RequestInit).body as string));
+}
+
+/** Count of GET requests to `url` (a tree reload bumps this). */
+function getCount(url: string): number {
+  return vi
+    .mocked(fetch)
+    .mock.calls.filter(
+      ([u, init]) =>
+        u === url && (init as RequestInit | undefined)?.method !== "POST",
+    ).length;
+}
+
+describe("App note mutations", () => {
+  it("creates a child note under a parent and reselects it", async () => {
+    vi.stubGlobal("prompt", vi.fn(() => "Tasks"));
+    const created: NoteContentResponse = {
+      path: "projects/tasks",
+      file: "projects/tasks.md",
+      markdown: "# Tasks\n",
+    };
+    stubRoutes({
+      [HEALTH_PATH]: { body: health },
+      [TREE_PATH]: { body: tree },
+      [NOTE_CREATE_PATH]: { body: { path: "projects/tasks", file: "projects/tasks.md" } },
+      [`${NOTE_PATH}?path=projects%2Ftasks`]: { body: created },
+    });
+
+    render(<App Editor={FakeEditor} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "New note under Projects" }));
+
+    // The create endpoint receives the parent identity + the prompted name...
+    await waitFor(() =>
+      expect(postBodies(NOTE_CREATE_PATH)).toEqual([
+        { parent: "projects", name: "Tasks" },
+      ]),
+    );
+    // ...and the new note is auto-selected (loaded into the center panel).
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("note-content").getAttribute("data-note-path"),
+      ).toBe("projects/tasks"),
+    );
+  });
+
+  it("reloads the tree after a successful mutation", async () => {
+    vi.stubGlobal("prompt", vi.fn(() => "Tasks"));
+    stubRoutes({
+      [HEALTH_PATH]: { body: health },
+      [TREE_PATH]: { body: tree },
+      [NOTE_CREATE_PATH]: { body: { path: "tasks", file: "tasks.md" } },
+      [`${NOTE_PATH}?path=tasks`]: {
+        body: { path: "tasks", file: "tasks.md", markdown: "# Tasks\n" },
+      },
+    });
+
+    render(<App Editor={FakeEditor} />);
+    await screen.findByRole("button", { name: "Home" });
+    expect(getCount(TREE_PATH)).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "New note under Home" }));
+
+    // The tree is refetched once the mutation lands, so the new note appears.
+    await waitFor(() => expect(getCount(TREE_PATH)).toBe(2));
+  });
+
+  it("renames a note in place", async () => {
+    vi.stubGlobal("prompt", vi.fn(() => "Renamed"));
+    stubRoutes({
+      [HEALTH_PATH]: { body: health },
+      [TREE_PATH]: { body: tree },
+      [NOTE_RENAME_PATH]: { body: { path: "renamed", file: "renamed.md" } },
+      [`${NOTE_PATH}?path=renamed`]: {
+        body: { path: "renamed", file: "renamed.md", markdown: "# Renamed\n" },
+      },
+    });
+
+    render(<App Editor={FakeEditor} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Rename Notes" }));
+
+    await waitFor(() =>
+      expect(postBodies(NOTE_RENAME_PATH)).toEqual([
+        { path: "notes", name: "Renamed" },
+      ]),
+    );
+  });
+
+  it("moves a note under the parent named in the prompt", async () => {
+    vi.stubGlobal("prompt", vi.fn(() => "projects"));
+    stubRoutes({
+      [HEALTH_PATH]: { body: health },
+      [TREE_PATH]: { body: tree },
+      [NOTE_MOVE_PATH]: { body: { path: "projects/notes", file: "projects/notes.md" } },
+      [`${NOTE_PATH}?path=projects%2Fnotes`]: {
+        body: { path: "projects/notes", file: "projects/notes.md", markdown: "# Notes\n" },
+      },
+    });
+
+    render(<App Editor={FakeEditor} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Move Notes" }));
+
+    await waitFor(() =>
+      expect(postBodies(NOTE_MOVE_PATH)).toEqual([
+        { path: "notes", parent: "projects" },
+      ]),
+    );
+  });
+
+  it("does not call the API when the create prompt is cancelled", async () => {
+    vi.stubGlobal("prompt", vi.fn(() => null));
+    stubRoutes({
+      [HEALTH_PATH]: { body: health },
+      [TREE_PATH]: { body: tree },
+      [NOTE_CREATE_PATH]: { body: { path: "x", file: "x.md" } },
+    });
+
+    render(<App Editor={FakeEditor} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "New note under Home" }));
+
+    // Give any (unexpected) request a tick to fire, then assert none did.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(postBodies(NOTE_CREATE_PATH)).toEqual([]);
+  });
+
+  it("shows the server's error message when a mutation is rejected", async () => {
+    vi.stubGlobal("prompt", vi.fn(() => "Ideas"));
+    stubRoutes({
+      [HEALTH_PATH]: { body: health },
+      [TREE_PATH]: { body: tree },
+      [NOTE_CREATE_PATH]: {
+        status: 400,
+        body: { error: "a note already exists at projects/ideas" },
+      },
+    });
+
+    render(<App Editor={FakeEditor} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "New note under Projects" }));
+
+    expect(
+      await screen.findByText(/a note already exists at projects\/ideas/),
+    ).toBeTruthy();
+    // A rejected create never reshapes the tree, so no reload happens.
+    expect(getCount(TREE_PATH)).toBe(1);
+  });
+});

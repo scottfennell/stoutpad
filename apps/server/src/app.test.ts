@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 import request from "supertest";
 import {
   HEALTH_PATH,
+  NOTE_CREATE_PATH,
+  NOTE_MOVE_PATH,
   NOTE_PATH,
+  NOTE_RENAME_PATH,
+  NoteMutationError,
   SYNC_PATH,
   TREE_PATH,
   type HealthStatus,
@@ -369,6 +373,246 @@ describe("note sync round-trip", () => {
     const res = await request(app)
       .post(SYNC_PATH)
       .send({ path: "notes", action: "delete-wip" });
+
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("note create round-trip", () => {
+  it("creates a note under a parent and returns its new identity", async () => {
+    const calls: Array<{ parent: string; name: string }> = [];
+    const app = createApp({
+      getHealth: async () => okHealth,
+      createNote: async (parent, name) => {
+        calls.push({ parent, name });
+        return { path: "projects/ideas", file: "projects/ideas.md" };
+      },
+    });
+
+    const res = await request(app)
+      .post(NOTE_CREATE_PATH)
+      .send({ parent: "projects", name: "Ideas" });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ path: "projects/ideas", file: "projects/ideas.md" });
+    expect(calls).toEqual([{ parent: "projects", name: "Ideas" }]);
+  });
+
+  it("treats a missing parent as the root note", async () => {
+    let seenParent: string | undefined;
+    const app = createApp({
+      getHealth: async () => okHealth,
+      createNote: async (parent) => {
+        seenParent = parent;
+        return { path: "ideas", file: "ideas.md" };
+      },
+    });
+
+    const res = await request(app).post(NOTE_CREATE_PATH).send({ name: "Ideas" });
+
+    expect(res.status).toBe(200);
+    expect(seenParent).toBe("");
+  });
+
+  it("returns 400 when the name is missing or blank", async () => {
+    const app = createApp({
+      getHealth: async () => okHealth,
+      createNote: async () => {
+        throw new Error("must not be called");
+      },
+    });
+
+    const missing = await request(app).post(NOTE_CREATE_PATH).send({ parent: "p" });
+    const blank = await request(app)
+      .post(NOTE_CREATE_PATH)
+      .send({ parent: "p", name: "   " });
+
+    expect(missing.status).toBe(400);
+    expect(blank.status).toBe(400);
+    expect(blank.body.error).toContain("name");
+  });
+
+  it("maps a NoteMutationError (e.g. duplicate) to a 400", async () => {
+    const app = createApp({
+      getHealth: async () => okHealth,
+      createNote: async () => {
+        throw new NoteMutationError("a note already exists at projects/ideas");
+      },
+    });
+
+    const res = await request(app)
+      .post(NOTE_CREATE_PATH)
+      .send({ parent: "projects", name: "Ideas" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("already exists");
+  });
+
+  it("returns 500 when the engine fails unexpectedly", async () => {
+    const app = createApp({
+      getHealth: async () => okHealth,
+      createNote: async () => {
+        throw new Error("git exploded");
+      },
+    });
+
+    const res = await request(app)
+      .post(NOTE_CREATE_PATH)
+      .send({ parent: "projects", name: "Ideas" });
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toContain("git exploded");
+  });
+
+  it("does not mount the create endpoint when no creator is injected", async () => {
+    const app = createApp({ getHealth: async () => okHealth });
+
+    const res = await request(app)
+      .post(NOTE_CREATE_PATH)
+      .send({ parent: "p", name: "x" });
+
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("note rename round-trip", () => {
+  it("renames a note and returns its new identity", async () => {
+    const calls: Array<{ path: string; name: string }> = [];
+    const app = createApp({
+      getHealth: async () => okHealth,
+      renameNote: async (path, name) => {
+        calls.push({ path, name });
+        return { path: "work", file: "work/_index.md" };
+      },
+    });
+
+    const res = await request(app)
+      .post(NOTE_RENAME_PATH)
+      .send({ path: "projects", name: "Work" });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ path: "work", file: "work/_index.md" });
+    expect(calls).toEqual([{ path: "projects", name: "Work" }]);
+  });
+
+  it("returns 400 when path or name is missing", async () => {
+    const app = createApp({
+      getHealth: async () => okHealth,
+      renameNote: async () => {
+        throw new Error("must not be called");
+      },
+    });
+
+    const noPath = await request(app).post(NOTE_RENAME_PATH).send({ name: "Work" });
+    const noName = await request(app)
+      .post(NOTE_RENAME_PATH)
+      .send({ path: "projects" });
+
+    expect(noPath.status).toBe(400);
+    expect(noPath.body.error).toContain("path");
+    expect(noName.status).toBe(400);
+    expect(noName.body.error).toContain("name");
+  });
+
+  it("maps a NoteMutationError to a 400", async () => {
+    const app = createApp({
+      getHealth: async () => okHealth,
+      renameNote: async () => {
+        throw new NoteMutationError("cannot rename the root note");
+      },
+    });
+
+    const res = await request(app)
+      .post(NOTE_RENAME_PATH)
+      .send({ path: "x", name: "Y" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("root note");
+  });
+
+  it("does not mount the rename endpoint when no renamer is injected", async () => {
+    const app = createApp({ getHealth: async () => okHealth });
+
+    const res = await request(app)
+      .post(NOTE_RENAME_PATH)
+      .send({ path: "x", name: "Y" });
+
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("note move round-trip", () => {
+  it("moves a note under a new parent and returns its new identity", async () => {
+    const calls: Array<{ path: string; parent: string }> = [];
+    const app = createApp({
+      getHealth: async () => okHealth,
+      moveNote: async (path, parent) => {
+        calls.push({ path, parent });
+        return { path: "b/only", file: "b/only.md" };
+      },
+    });
+
+    const res = await request(app)
+      .post(NOTE_MOVE_PATH)
+      .send({ path: "a/only", parent: "b" });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ path: "b/only", file: "b/only.md" });
+    expect(calls).toEqual([{ path: "a/only", parent: "b" }]);
+  });
+
+  it("treats a missing parent as the root note", async () => {
+    let seenParent: string | undefined;
+    const app = createApp({
+      getHealth: async () => okHealth,
+      moveNote: async (_path, parent) => {
+        seenParent = parent;
+        return { path: "only", file: "only.md" };
+      },
+    });
+
+    const res = await request(app).post(NOTE_MOVE_PATH).send({ path: "a/only" });
+
+    expect(res.status).toBe(200);
+    expect(seenParent).toBe("");
+  });
+
+  it("returns 400 when path is missing", async () => {
+    const app = createApp({
+      getHealth: async () => okHealth,
+      moveNote: async () => {
+        throw new Error("must not be called");
+      },
+    });
+
+    const res = await request(app).post(NOTE_MOVE_PATH).send({ parent: "b" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("path");
+  });
+
+  it("maps a NoteMutationError (move into own subtree) to a 400", async () => {
+    const app = createApp({
+      getHealth: async () => okHealth,
+      moveNote: async () => {
+        throw new NoteMutationError("cannot move a into its own subtree");
+      },
+    });
+
+    const res = await request(app)
+      .post(NOTE_MOVE_PATH)
+      .send({ path: "a", parent: "a/b" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("own subtree");
+  });
+
+  it("does not mount the move endpoint when no mover is injected", async () => {
+    const app = createApp({ getHealth: async () => okHealth });
+
+    const res = await request(app)
+      .post(NOTE_MOVE_PATH)
+      .send({ path: "a/only", parent: "b" });
 
     expect(res.status).toBe(404);
   });

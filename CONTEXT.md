@@ -29,16 +29,35 @@ that directory may also hold child notes. A parent note still has its own conten
 **title** derives from the folder name. The repository root is itself a parent
 note, backed by the root `_index.md`.
 
-A **leaf↔parent transition** (giving a leaf note its first child, or removing a
-parent's last child) is a single `git mv` that preserves the note's `path`
-identity. (Transitions land in a later slice; the identity model that makes them
-cheap is established now.)
+A **leaf↔parent transition** keeps a note's `path` identity stable as it gains or
+loses children. **Promotion**: giving a leaf its first child turns `Foo.md` into
+`Foo/_index.md` (a single `git mv`) so the child has somewhere to live.
+**Collapse**: the symmetric inverse — removing a parent's *last* child turns
+`Foo/_index.md` back into `Foo.md`. Collapse is **automatic** (a parent that
+loses its last child becomes a leaf again) but never applies to the repository
+root, which is always a parent. Promotion and collapse are exact inverses,
+computed by the **note mutation** planner.
 
 ### `_index.md`
 
 The conventional file name that makes a directory a parent note and holds that
 parent note's own content. It is the parent's backing file, never a child note
 named "_index".
+
+### Note mutation
+
+A change to the note tree's *shape* (as opposed to a note's content): **create** a
+new note, **rename** a note in place, or **move** a note under a different parent.
+Each carries the **leaf↔parent transition** automatically (promotion on a parent's
+first child, collapse on its last) and, for a parent, moves its whole subtree as
+one directory rename. Planned purely by `core/note-mutation` (current files +
+operation → a `NoteMutation`: the backing-file `moves`/`creates`/`removes` plus
+the resulting identity), then applied by the **git engine** as **one atomic
+commit** on `main` (all-or-nothing; a failure rolls back). Exposed as three verbs
+— `POST /api/note/create`, `/api/note/rename`, `/api/note/move` — each returning
+the affected note's new `path`/`file`; an invalid name, a colliding target, or
+moving a note into its own subtree is a `NoteMutationError` (HTTP 400). Names
+become safe kebab-case file slugs via `slugifyNoteName`.
 
 ### Canonical Markdown
 
@@ -136,9 +155,10 @@ and the write contract (`WritableGitEngine.writeNoteFile`, plus the
 canonicalize-then-commit composition `writeNote`) live in `@stout/core`
 (runtime-agnostic), as does the narrow **wip engine** seam the autosave machine
 drives (`WipSyncEngine`: `commitToWip`/`squashMergeWipToMain`/`deleteWip`, with no
-push by design; `WipGitEngine` extends both). The Node implementation that touches
-the filesystem and the `git` binary (`NodeGitEngine`, `ensureWorkspaceRepo`) lives
-in `apps/server`.
+push by design; `WipGitEngine` extends both) and the **note mutation** seam
+(`MutatingGitEngine.applyNoteMutation`, which applies a create/rename/move plan as
+one atomic commit). The Node implementation that touches the filesystem and the
+`git` binary (`NodeGitEngine`, `ensureWorkspaceRepo`) lives in `apps/server`.
 
 ### Health status
 

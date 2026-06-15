@@ -1,13 +1,21 @@
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import express, { type Express } from "express";
+import express, { type Express, type Response } from "express";
 import {
   HEALTH_PATH,
+  NOTE_CREATE_PATH,
+  NOTE_MOVE_PATH,
   NOTE_PATH,
+  NOTE_RENAME_PATH,
+  NoteMutationError,
   SYNC_PATH,
   TREE_PATH,
   type HealthStatus,
   type NoteContentResponse,
+  type NoteCreateRequest,
+  type NoteMoveRequest,
+  type NoteMutationResponse,
+  type NoteRenameRequest,
   type NoteSaveRequest,
   type NoteSyncRequest,
   type NoteSyncResponse,
@@ -42,6 +50,22 @@ export interface AppDeps {
    * endpoint.
    */
   syncNote?: (request: NoteSyncRequest) => Promise<NoteSyncResponse>;
+  /**
+   * Create a new leaf note named `name` under the `parent` note (promoting the
+   * parent from a leaf if needed), returning the new note's identity. Injected so
+   * HTTP behavior is tested without a real repo. Omit to skip the endpoint.
+   */
+  createNote?: (parent: string, name: string) => Promise<NoteMutationResponse>;
+  /**
+   * Rename a note in place (moving its whole subtree if it is a parent),
+   * returning the note's new identity. Omit to skip the endpoint.
+   */
+  renameNote?: (path: string, name: string) => Promise<NoteMutationResponse>;
+  /**
+   * Move a note under a different `parent` (promoting/collapsing as needed),
+   * returning the note's new identity. Omit to skip the endpoint.
+   */
+  moveNote?: (path: string, parent: string) => Promise<NoteMutationResponse>;
   /** Absolute path to the built UI assets. Omit to skip static hosting. */
   uiDir?: string;
 }
@@ -49,6 +73,26 @@ export interface AppDeps {
 /** Whether `value` is one of the three valid wip-branch sync actions. */
 function isSyncAction(value: unknown): value is SyncAction {
   return value === "autosave" || value === "squash" || value === "delete-wip";
+}
+
+/**
+ * Run a note mutation and send its result, mapping a {@link NoteMutationError}
+ * (invalid name, duplicate target, illegal move) to a 400 client error and any
+ * other failure to a 500 — mirroring the read/write routes' error handling.
+ */
+async function respondMutation(
+  res: Response,
+  run: () => Promise<NoteMutationResponse>,
+): Promise<void> {
+  try {
+    res.json(await run());
+  } catch (err) {
+    if (err instanceof NoteMutationError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
 }
 
 /** Resolve the directory holding the built `@stout/ui` SPA assets. */
@@ -167,6 +211,55 @@ export function createApp(deps: AppDeps): Express {
           error: err instanceof Error ? err.message : String(err),
         });
       }
+    });
+  }
+
+  if (deps.createNote) {
+    const createNote = deps.createNote;
+    // `POST /api/note/create` creates a new leaf note under `parent`, promoting
+    // the parent from a leaf to a directory note when it gains its first child.
+    app.post(NOTE_CREATE_PATH, express.json({ limit: "1mb" }), async (req, res) => {
+      const body = (req.body ?? {}) as Partial<NoteCreateRequest>;
+      const parent = typeof body.parent === "string" ? body.parent : "";
+      if (typeof body.name !== "string" || body.name.trim() === "") {
+        res.status(400).json({ error: "name (non-empty string) is required" });
+        return;
+      }
+      await respondMutation(res, () => createNote(parent, body.name as string));
+    });
+  }
+
+  if (deps.renameNote) {
+    const renameNote = deps.renameNote;
+    // `POST /api/note/rename` renames a note in place (whole subtree for a parent).
+    app.post(NOTE_RENAME_PATH, express.json({ limit: "1mb" }), async (req, res) => {
+      const body = (req.body ?? {}) as Partial<NoteRenameRequest>;
+      if (typeof body.path !== "string" || body.path === "") {
+        res.status(400).json({ error: "path (non-empty string) is required" });
+        return;
+      }
+      if (typeof body.name !== "string" || body.name.trim() === "") {
+        res.status(400).json({ error: "name (non-empty string) is required" });
+        return;
+      }
+      await respondMutation(res, () =>
+        renameNote(body.path as string, body.name as string),
+      );
+    });
+  }
+
+  if (deps.moveNote) {
+    const moveNote = deps.moveNote;
+    // `POST /api/note/move` moves a note under a different parent. The destination
+    // `parent` defaults to the root note when absent.
+    app.post(NOTE_MOVE_PATH, express.json({ limit: "1mb" }), async (req, res) => {
+      const body = (req.body ?? {}) as Partial<NoteMoveRequest>;
+      const parent = typeof body.parent === "string" ? body.parent : "";
+      if (typeof body.path !== "string" || body.path === "") {
+        res.status(400).json({ error: "path (non-empty string) is required" });
+        return;
+      }
+      await respondMutation(res, () => moveNote(body.path as string, parent));
     });
   }
 

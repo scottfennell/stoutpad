@@ -1,6 +1,14 @@
 import type pg from "pg";
 import type { HealthStatus } from "@stout/core";
-import { applyNoteSync, readNote, readNoteTree, writeNote } from "@stout/core";
+import {
+  applyNoteSync,
+  createNote,
+  moveNote,
+  readNote,
+  readNoteTree,
+  renameNote,
+  writeNote,
+} from "@stout/core";
 import { createApp, resolveUiDir } from "./app.js";
 import {
   bootstrapDatabase,
@@ -53,6 +61,9 @@ async function main(): Promise<void> {
     getNote: (path) => readNote(gitEngine, path),
     saveNote: (path, markdown) => writeNote(gitEngine, path, markdown),
     syncNote: (request) => applyNoteSync(gitEngine, request),
+    createNote: (parent, name) => createNote(gitEngine, parent, name),
+    renameNote: (path, name) => renameNote(gitEngine, path, name),
+    moveNote: (path, parent) => moveNote(gitEngine, path, parent),
     uiDir: resolveUiDir(),
   });
   app.listen(port, () => {

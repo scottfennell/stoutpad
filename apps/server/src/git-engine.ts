@@ -26,7 +26,9 @@ import {
   canonicalizeMarkdown,
   resolveWriteTarget,
   wipBranchName,
+  type MutatingGitEngine,
   type NoteFile,
+  type NoteMutation,
   type WipGitEngine,
 } from "@stout/core";
 
@@ -94,11 +96,13 @@ export async function ensureWorkspaceRepo(paths: RepoPaths): Promise<void> {
  * {@link commitToWip} appends an autosave commit to `wip/<note>` (created from
  * `main` on the first commit of a session), {@link squashMergeWipToMain} folds
  * the whole session onto `main` as one commit, and {@link deleteWip} removes the
- * branch. Wip branches are local-only — nothing here pushes, so they are never
- * published. Every method restores the clone to a clean `main` checkout, so the
- * working tree the read/commit-on-save paths see is always `main`.
+ * branch. It also applies tree mutations (create / rename / move, including the
+ * leaf↔parent transition) atomically via {@link applyNoteMutation}. Wip branches
+ * are local-only — nothing here pushes, so they are never published. Every method
+ * restores the clone to a clean `main` checkout, so the working tree the
+ * read/commit-on-save paths see is always `main`.
  */
-export class NodeGitEngine implements WipGitEngine {
+export class NodeGitEngine implements WipGitEngine, MutatingGitEngine {
   constructor(private readonly cloneDir: string) {}
 
   async listNoteFiles(): Promise<NoteFile[]> {
@@ -131,6 +135,46 @@ export class NodeGitEngine implements WipGitEngine {
     // empty commit (commit-on-save is idempotent at the git level too).
     if (await this.isClean(path)) return;
     await this.git(["commit", "-m", message, "--", path]);
+  }
+
+  /**
+   * Apply a tree mutation (create / rename / move, including a leaf↔parent
+   * promotion or collapse) as **one atomic commit** on `main`.
+   *
+   * Runs the plan's directory/file `moves` (`git mv`, mkdir-ing destinations as
+   * needed), then `creates` (write + `git add`), then `removes` (`git rm`), and
+   * commits once with the plan's message — skipping the commit when the mutation
+   * is a no-op. Every path is escape-guarded against leaving the clone. On any
+   * error the working tree is reset so a half-applied mutation never lands
+   * (all-or-nothing). Operates on `main`; nothing here pushes.
+   */
+  async applyNoteMutation(mutation: NoteMutation): Promise<void> {
+    try {
+      await this.checkoutMain();
+      for (const move of mutation.moves) {
+        this.safePath(move.from);
+        const to = this.safePath(move.to);
+        await mkdir(dirname(to), { recursive: true });
+        await this.git(["mv", move.from, move.to]);
+      }
+      for (const create of mutation.creates) {
+        const full = this.safePath(create.path);
+        await mkdir(dirname(full), { recursive: true });
+        await writeFile(full, create.content, "utf8");
+        await this.git(["add", "--", create.path]);
+      }
+      for (const remove of mutation.removes) {
+        this.safePath(remove);
+        await this.git(["rm", "--", remove]);
+      }
+      if (await this.isClean()) return;
+      await this.git(["commit", "-m", mutation.message]);
+    } catch (err) {
+      // Roll back any partial, uncommitted mutation so it is all-or-nothing.
+      await this.git(["reset", "--hard", "HEAD"]).catch(() => undefined);
+      await this.git(["clean", "-fd"]).catch(() => undefined);
+      throw err;
+    }
   }
 
   /** Ref name of the note's wip branch (see core `wipBranchName`). */
@@ -249,6 +293,18 @@ export class NodeGitEngine implements WipGitEngine {
     const root = resolve(this.cloneDir);
     const full = resolve(root, path);
     if (full !== root && !full.startsWith(root + sep)) return null;
+    return full;
+  }
+
+  /**
+   * Like {@link resolveInClone} but throws on an escape — used by the write/
+   * mutation paths where a crafted path must hard-fail rather than be skipped.
+   */
+  private safePath(path: string): string {
+    const full = this.resolveInClone(path);
+    if (full === null) {
+      throw new Error(`refusing to touch a path outside the working clone: ${path}`);
+    }
     return full;
   }
 }
