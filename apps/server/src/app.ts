@@ -1,11 +1,21 @@
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import express, { type Express } from "express";
-import { HEALTH_PATH, type HealthStatus } from "@stout/core";
+import {
+  HEALTH_PATH,
+  TREE_PATH,
+  type HealthStatus,
+  type NoteTreeResponse,
+} from "@stout/core";
 
 export interface AppDeps {
   /** Produce the current health status (injected so it can be faked in tests). */
   getHealth: () => Promise<HealthStatus>;
+  /**
+   * Produce the unified note tree. Injected so HTTP behavior is tested without a
+   * real repo. Omit to skip mounting the tree endpoint.
+   */
+  getTree?: () => Promise<NoteTreeResponse>;
   /** Absolute path to the built UI assets. Omit to skip static hosting. */
   uiDir?: string;
 }
@@ -35,6 +45,19 @@ export function createApp(deps: AppDeps): Express {
       });
     }
   });
+
+  if (deps.getTree) {
+    const getTree = deps.getTree;
+    app.get(TREE_PATH, async (_req, res) => {
+      try {
+        res.json(await getTree());
+      } catch (err) {
+        res.status(500).json({
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+  }
 
   if (deps.uiDir) {
     app.use(express.static(deps.uiDir));

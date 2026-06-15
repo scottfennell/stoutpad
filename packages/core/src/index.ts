@@ -1,10 +1,14 @@
 /**
  * Shared, runtime-agnostic domain contracts for Stout.
  *
- * For the walking skeleton this only carries the health-check contract that the
- * server returns and the UI renders, proving the core package wires into both
- * the server and browser runtimes unchanged.
+ * Carries the health-check contract (walking skeleton) plus the note-tree
+ * domain: the pure file-set → tree mapper, the git-engine read seam, and the
+ * `GET /api/tree` contract. Everything here is runtime-agnostic — the Node/Git
+ * implementations live in `apps/server`.
  */
+
+export * from "./note-tree.js";
+export * from "./git-engine.js";
 
 /** Health status reported by the server's `/api/health` endpoint. */
 export interface HealthStatus {

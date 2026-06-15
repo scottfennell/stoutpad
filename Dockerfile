@@ -23,8 +23,16 @@ FROM node:22-bookworm-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
+# Repo + working clone live on the mounted /data volume.
+ENV STOUT_DATA_DIR=/data
 
 RUN corepack enable
+
+# `git` is required at runtime: first boot initializes a bare repo + working
+# clone, and the git-engine reads the clone. The slim image omits it.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git \
+  && rm -rf /var/lib/apt/lists/*
 
 # Copy the built workspace wholesale; pnpm's relative symlinks are preserved.
 COPY --from=builder /app ./

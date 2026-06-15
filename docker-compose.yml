@@ -26,6 +26,7 @@ services:
     environment:
       DATABASE_URL: postgres://stout:stout@postgres:5432/postgres
       STOUT_DB_NAME: stout
+      STOUT_DATA_DIR: /data
       PORT: "3000"
     ports:
       - "3000:3000"

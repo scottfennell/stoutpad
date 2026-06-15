@@ -1,11 +1,17 @@
 import type pg from "pg";
 import type { HealthStatus } from "@stout/core";
+import { readNoteTree } from "@stout/core";
 import { createApp, resolveUiDir } from "./app.js";
 import {
   bootstrapDatabase,
   loadDbConfig,
   PgMigrationStore,
 } from "./db.js";
+import {
+  ensureWorkspaceRepo,
+  loadRepoPaths,
+  NodeGitEngine,
+} from "./git-engine.js";
 import { runMigrations } from "./migrate.js";
 import { migrations } from "./migrations.js";
 
@@ -24,6 +30,12 @@ async function main(): Promise<void> {
       (result.applied.length ? ` (applied ${result.applied.join(", ")})` : ""),
   );
 
+  // First-boot: init the bare repo + working clone seeded with a starter note.
+  const repoPaths = loadRepoPaths();
+  await ensureWorkspaceRepo(repoPaths);
+  const gitEngine = new NodeGitEngine(repoPaths.cloneDir);
+  console.log(`[stout] note repository ready at ${repoPaths.cloneDir}`);
+
   const getHealth = async (): Promise<HealthStatus> => {
     const database = await checkDatabase(pool);
     return {
@@ -35,7 +47,11 @@ async function main(): Promise<void> {
     };
   };
 
-  const app = createApp({ getHealth, uiDir: resolveUiDir() });
+  const app = createApp({
+    getHealth,
+    getTree: () => readNoteTree(gitEngine),
+    uiDir: resolveUiDir(),
+  });
   app.listen(port, () => {
     console.log(`[stout] listening on http://0.0.0.0:${port}`);
   });
