@@ -1,13 +1,15 @@
 /**
- * The git-engine read seam.
+ * The git-engine read & write seam.
  *
- * `core/git-engine` is the deep module that reads the working clone; per the
- * project conventions the actual filesystem/Git access is a Node concern that
- * lives in `apps/server`. This file defines the runtime-agnostic contract the
- * server implements, plus the pure compositions that turn the files it reads
+ * `core/git-engine` is the deep module that reads and writes the working clone;
+ * per the project conventions the actual filesystem/Git access is a Node concern
+ * that lives in `apps/server`. This file defines the runtime-agnostic contracts
+ * the server implements ({@link GitEngine} for reads, {@link WritableGitEngine}
+ * for commit-on-save), plus the pure compositions that turn the files it reads
  * into a {@link NoteTreeResponse} (whole tree) or a {@link NoteContentResponse}
- * (a single note's Markdown). Keeping the interface here lets the HTTP layer
- * depend on an injected engine (real Git in production, a fake in tests) and
+ * (a single note's Markdown), and that canonicalize + persist an edit
+ * ({@link writeNote}). Keeping the interfaces here lets the HTTP layer depend on
+ * an injected engine (real Git in production, an in-memory fake in tests) and
  * lets a future browser/`isomorphic-git` backend drop in unchanged.
  */
 
@@ -17,6 +19,7 @@ import {
   normalizeNotePath,
   type NoteContentResponse,
 } from "./note-content.js";
+import { parseMarkdown, serializeMarkdown } from "./markdown.js";
 
 /** Reads the note files from a Git working clone. */
 export interface GitEngine {
@@ -30,6 +33,24 @@ export interface GitEngine {
    * resolve to `null` when no such file exists in the working clone.
    */
   readNoteFile(path: string): Promise<string | null>;
+}
+
+/**
+ * A {@link GitEngine} that can also persist a note: write a file in the working
+ * clone and commit it to `main` in one step.
+ *
+ * Keeping the write behind an interface (mirroring the `MigrationStore` seam)
+ * lets the pure {@link writeNote} composition be tested against an in-memory
+ * double, while production uses the Node implementation that shells out to `git`.
+ */
+export interface WritableGitEngine extends GitEngine {
+  /**
+   * Write `content` to the note file at `path` (repo-relative POSIX) in the
+   * working clone and commit it to `main` with `message`. Implementations must
+   * guard against path escapes and should skip the commit when the content is
+   * unchanged (no empty commits). Resolves once the commit (if any) is recorded.
+   */
+  writeNoteFile(path: string, content: string, message: string): Promise<void>;
 }
 
 /**
@@ -63,4 +84,45 @@ export async function readNote(
     }
   }
   return null;
+}
+
+/**
+ * Resolve the backing file a save should target for a note identity.
+ *
+ * Prefers the note's existing backing file (so editing a parent note writes its
+ * `_index.md`, not a sibling leaf), falling back to the leaf candidate (`path.md`,
+ * or the root `_index.md`) when the note does not exist yet. Pure but for the
+ * existence probes through the engine.
+ */
+async function resolveWriteTarget(
+  engine: GitEngine,
+  notePath: string,
+): Promise<string> {
+  const candidates = noteFileCandidates(notePath);
+  for (const file of candidates) {
+    if ((await engine.readNoteFile(file)) !== null) return file;
+  }
+  return candidates[0];
+}
+
+/**
+ * Persist a note's edited Markdown via the injected {@link WritableGitEngine}.
+ *
+ * The Markdown is **canonicalized** ({@link serializeMarkdown} ∘
+ * {@link parseMarkdown}) before it is written, so the committed file is always
+ * byte-stable canonical CommonMark + GFM. Resolves the note identity to its
+ * backing file, writes + commits it to `main`, and returns the saved
+ * {@link NoteContentResponse} (carrying the canonical Markdown the client should
+ * adopt). The canonicalization and identity → file resolution stay pure; only the
+ * write/commit touches the engine.
+ */
+export async function writeNote(
+  engine: WritableGitEngine,
+  notePath: string,
+  markdown: string,
+): Promise<NoteContentResponse> {
+  const canonical = serializeMarkdown(parseMarkdown(markdown));
+  const file = await resolveWriteTarget(engine, notePath);
+  await engine.writeNoteFile(file, canonical, `Edit ${file}`);
+  return { path: normalizeNotePath(notePath), file, markdown: canonical };
 }

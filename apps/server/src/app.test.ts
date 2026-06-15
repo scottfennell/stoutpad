@@ -169,3 +169,88 @@ describe("note round-trip", () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe("note save round-trip", () => {
+  it("saves an edited note and returns the canonical response", async () => {
+    const saved: NoteContentResponse = {
+      path: "notes",
+      file: "notes.md",
+      markdown: "# Notes\n\n- a\n- b\n",
+    };
+    const calls: Array<{ path: string; markdown: string }> = [];
+    const app = createApp({
+      getHealth: async () => okHealth,
+      saveNote: async (path, markdown) => {
+        calls.push({ path, markdown });
+        return saved;
+      },
+    });
+
+    const res = await request(app)
+      .post(NOTE_PATH)
+      .send({ path: "notes", markdown: "#  Notes\n\n*  a\n+  b\n" });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(saved);
+    // The raw edit reaches the saver verbatim (canonicalization is its job).
+    expect(calls).toEqual([
+      { path: "notes", markdown: "#  Notes\n\n*  a\n+  b\n" },
+    ]);
+  });
+
+  it("treats a missing path as the root note", async () => {
+    let savedPath: string | undefined;
+    const app = createApp({
+      getHealth: async () => okHealth,
+      saveNote: async (path, markdown) => {
+        savedPath = path;
+        return { path, file: "_index.md", markdown };
+      },
+    });
+
+    const res = await request(app).post(NOTE_PATH).send({ markdown: "# Home\n" });
+
+    expect(res.status).toBe(200);
+    expect(savedPath).toBe("");
+  });
+
+  it("returns 400 when the markdown body is missing", async () => {
+    const app = createApp({
+      getHealth: async () => okHealth,
+      saveNote: async () => {
+        throw new Error("must not be called");
+      },
+    });
+
+    const res = await request(app).post(NOTE_PATH).send({ path: "notes" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("markdown");
+  });
+
+  it("returns 500 when saving fails", async () => {
+    const app = createApp({
+      getHealth: async () => okHealth,
+      saveNote: async () => {
+        throw new Error("disk full");
+      },
+    });
+
+    const res = await request(app)
+      .post(NOTE_PATH)
+      .send({ path: "notes", markdown: "# x\n" });
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toContain("disk full");
+  });
+
+  it("does not mount the save endpoint when no saver is injected", async () => {
+    const app = createApp({ getHealth: async () => okHealth });
+
+    const res = await request(app)
+      .post(NOTE_PATH)
+      .send({ path: "notes", markdown: "# x\n" });
+
+    expect(res.status).toBe(404);
+  });
+});

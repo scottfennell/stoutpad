@@ -1,27 +1,45 @@
 /**
- * The note-content read contract.
+ * The note-content read & write contract.
  *
  * A note's **identity** is its tree `path` (see `core/note-tree`). To open a note
  * the HTTP layer resolves that identity to the Markdown file backing it and
- * returns the file's canonical Markdown. This module owns the pure pieces of that
- * contract — the REST path, the response shape, and the identity → backing-file
- * resolution — so the Node/Git read can stay a thin, injectable seam in
- * `apps/server`. The engine composition (`readNote`) lives alongside
- * {@link readNoteTree} in `core/git-engine`.
+ * returns the file's canonical Markdown; to save one it sends the edited Markdown
+ * back, which is canonicalized and committed. This module owns the pure pieces of
+ * that contract — the REST path, the request/response shapes, and the identity →
+ * backing-file resolution — so the Node/Git read and write stay thin, injectable
+ * seams in `apps/server`. The engine compositions (`readNote`/`writeNote`) live
+ * alongside {@link readNoteTree} in `core/git-engine`.
+ *
+ * The single endpoint `/api/note` is read on `GET` (`?path=<identity>`) and
+ * written on `POST` (a {@link NoteSaveRequest} body).
  */
 
 import { INDEX_FILE } from "./note-tree.js";
 
-/** REST path of the read-only single-note endpoint (`?path=<identity>`). */
+/** REST path of the single-note endpoint: `GET` reads, `POST` saves. */
 export const NOTE_PATH = "/api/note" as const;
 
-/** Response body of `GET /api/note`. */
+/** Response body of `GET /api/note` (and of a successful `POST /api/note`). */
 export interface NoteContentResponse {
   /** Stable identity of the note (its tree `path`; the root note is `""`). */
   path: string;
   /** Repo-relative path of the Markdown file backing the note. */
   file: string;
   /** Canonical Markdown content of the note. */
+  markdown: string;
+}
+
+/**
+ * Request body of `POST /api/note` — save a note's content.
+ *
+ * The `markdown` is canonicalized server-side (see `serializeMarkdown`) before it
+ * is written and committed, so the persisted file is always canonical CommonMark
+ * + GFM regardless of how the editor formatted its output.
+ */
+export interface NoteSaveRequest {
+  /** Identity (tree `path`) of the note to save; the root note is `""`. */
+  path: string;
+  /** Edited Markdown content (canonicalized before writing). */
   markdown: string;
 }
 

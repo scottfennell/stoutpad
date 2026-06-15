@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   parseInline,
   parseMarkdown,
+  serializeMarkdown,
   spansToPlainText,
   type MarkdownDocument,
 } from "./markdown.js";
@@ -89,5 +90,50 @@ describe("parseInline", () => {
 
   it("round-trips to plain text via spansToPlainText", () => {
     expect(spansToPlainText(parseInline("a **b** c"))).toBe("a b c");
+  });
+});
+
+describe("serializeMarkdown", () => {
+  it("renders a representative note as canonical CommonMark + GFM", () => {
+    // Headings, **bold**/*italic* prose, a bullet list and a task list.
+    const blocks = parseMarkdown(SAMPLE).blocks;
+    expect(serializeMarkdown(blocks)).toBe(SAMPLE);
+  });
+
+  it("accepts a MarkdownDocument as well as a bare block array", () => {
+    const doc = parseMarkdown(SAMPLE);
+    expect(serializeMarkdown(doc)).toBe(serializeMarkdown(doc.blocks));
+  });
+
+  it("emits the empty string for an empty note", () => {
+    expect(serializeMarkdown(parseMarkdown(""))).toBe("");
+  });
+
+  it("normalizes loose Markdown to the canonical byte form", () => {
+    // Mixed bullet markers, ragged checkbox casing, and extra blank lines all
+    // collapse to one canonical representation.
+    const loose = "#  Title\n\n*  one\n+  two\n\n\n- [X] done\n";
+    expect(serializeMarkdown(parseMarkdown(loose))).toBe(
+      "# Title\n\n- one\n- two\n\n- [x] done\n",
+    );
+  });
+
+  it("is idempotent: serialize -> parse -> serialize is byte-stable", () => {
+    const inputs = [
+      SAMPLE,
+      "",
+      "# Only a heading\n",
+      "Just a paragraph with *italic* and `code`.\n",
+      "- [ ] a\n- [x] b\n\n- plain\n",
+      "#  sloppy\n\n*  mixed\n+  bullets\n",
+    ];
+    for (const input of inputs) {
+      const once = serializeMarkdown(parseMarkdown(input));
+      const twice = serializeMarkdown(parseMarkdown(once));
+      // The fixed point is reached after a single pass and never drifts.
+      expect(twice).toBe(once);
+      // parse(serialize(x)) round-trips: re-parsing canonical text is stable.
+      expect(parseMarkdown(twice)).toEqual(parseMarkdown(once));
+    }
   });
 });

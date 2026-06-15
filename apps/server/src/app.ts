@@ -7,6 +7,7 @@ import {
   TREE_PATH,
   type HealthStatus,
   type NoteContentResponse,
+  type NoteSaveRequest,
   type NoteTreeResponse,
 } from "@stout/core";
 
@@ -24,6 +25,12 @@ export interface AppDeps {
    * tested without a real repo. Omit to skip mounting the note endpoint.
    */
   getNote?: (path: string) => Promise<NoteContentResponse | null>;
+  /**
+   * Persist a note's edited Markdown by identity (tree `path`), returning the
+   * saved note with its canonical Markdown. Injected so HTTP behavior is tested
+   * without a real repo. Omit to skip mounting the save endpoint.
+   */
+  saveNote?: (path: string, markdown: string) => Promise<NoteContentResponse>;
   /** Absolute path to the built UI assets. Omit to skip static hosting. */
   uiDir?: string;
 }
@@ -80,6 +87,28 @@ export function createApp(deps: AppDeps): Express {
           return;
         }
         res.json(note);
+      } catch (err) {
+        res.status(500).json({
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+  }
+
+  if (deps.saveNote) {
+    const saveNote = deps.saveNote;
+    // `POST /api/note` saves an edited note. The body is the note's identity plus
+    // its Markdown; the engine canonicalizes and commits it to `main`.
+    app.post(NOTE_PATH, express.json({ limit: "5mb" }), async (req, res) => {
+      const body = (req.body ?? {}) as Partial<NoteSaveRequest>;
+      // The root note has the empty-string identity, so a missing `path` saves it.
+      const path = typeof body.path === "string" ? body.path : "";
+      if (typeof body.markdown !== "string") {
+        res.status(400).json({ error: "markdown (string) is required" });
+        return;
+      }
+      try {
+        res.json(await saveNote(path, body.markdown));
       } catch (err) {
         res.status(500).json({
           error: err instanceof Error ? err.message : String(err),

@@ -48,7 +48,24 @@ document model, rendered HTML) is derived from it and serialized back to Markdow
 on edit; Markdown is what git stores and what `GET /api/note`
 (`NOTE_PATH`/`NoteContentResponse`) returns, keyed by the note's `path` identity.
 The pure `core/markdown` parser turns it into a small block model (headings,
-paragraphs, bullet lists, and checkbox **task lists**) without touching the DOM.
+paragraphs, bullet lists, and checkbox **task lists**) without touching the DOM,
+and its inverse `serializeMarkdown` renders that model back to **canonical**
+CommonMark + GFM. "Canonical" is a strong promise: serialization is
+**deterministic** (same model → same bytes) and **idempotent** (re-parsing and
+re-serializing is byte-stable), so the same logical content always lands as the
+same file and edits produce small, meaningful git diffs.
+
+### Commit-on-save
+
+Persisting an edit is a git commit. `POST /api/note`
+(`NOTE_PATH`/`NoteSaveRequest`) takes the editor's Markdown, runs it through the
+canonical serializer, writes the note's backing file in the **working clone**,
+and commits it to `main` via the **git engine** — one commit per save. A save
+that produces no change is a no-op (no empty commit), so commit-on-save is
+idempotent at the git level too. Reloading the note (`GET /api/note`) reflects
+the committed content, and `git log` shows the commit. (Coalescing rapid edits
+into fewer commits — autosave/squash — is a later slice; this slice persists each
+debounced edit.)
 
 ### Editor seam
 
@@ -62,8 +79,10 @@ Node out of core.
 ### Working clone
 
 The checked-out git clone (`<STOUT_DATA_DIR>/clone`) that the server reads and
-edits. `core/git-engine` reads the working clone; the note-tree mapper turns the
-files it lists into the note tree.
+edits. `core/git-engine` reads the working clone and commits edits to it; the
+note-tree mapper turns the files it lists into the note tree. (Pushing the
+clone's commits to the **bare repo** — sync — is a later slice; for now edits are
+committed on the clone.)
 
 ### Bare repo
 
@@ -74,8 +93,10 @@ seeds a starter `_index.md`, and pushes that seed back to the bare repo.
 
 ### Git engine
 
-The deep module (`core/git-engine`) that reads the working clone. The contract
-(`GitEngine.listNoteFiles`, `readNoteTree`) lives in `@stout/core`
+The deep module (`core/git-engine`) that reads and writes the working clone. The
+read contract (`GitEngine.listNoteFiles`/`readNoteFile`, `readNoteTree`/`readNote`)
+and the write contract (`WritableGitEngine.writeNoteFile`, plus the
+canonicalize-then-commit composition `writeNote`) live in `@stout/core`
 (runtime-agnostic); the Node implementation that touches the filesystem and the
 `git` binary (`NodeGitEngine`, `ensureWorkspaceRepo`) lives in `apps/server`.
 

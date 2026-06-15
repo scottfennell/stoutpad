@@ -72,6 +72,17 @@ const FakeEditor: EditorComponent = ({ markdown }) => (
   <pre data-testid="fake-editor">{markdown}</pre>
 );
 
+/** An Editor seam that emits an edit (through the seam) when its button is clicked. */
+const EditableFake: EditorComponent = ({ markdown, onChange }) => (
+  <button
+    type="button"
+    data-testid="editor-edit"
+    onClick={() => onChange?.(`${markdown}edited\n`)}
+  >
+    edit
+  </button>
+);
+
 describe("App", () => {
   it("renders the health result returned by the server", async () => {
     stubApi({ [HEALTH_PATH]: health, [TREE_PATH]: tree });
@@ -127,5 +138,43 @@ describe("App", () => {
     expect(screen.getByTestId("note-content").getAttribute("data-note-path")).toBe(
       "notes",
     );
+  });
+
+  it("saves edits made through the Editor seam via POST /api/note", async () => {
+    const note: NoteContentResponse = {
+      path: "notes",
+      file: "notes.md",
+      markdown: "# Notes\n",
+    };
+    stubApi({
+      [HEALTH_PATH]: health,
+      [TREE_PATH]: tree,
+      [`${NOTE_PATH}?path=notes`]: note,
+      // The POST hits the bare `/api/note` key (no query string).
+      [NOTE_PATH]: { ...note, markdown: "# Notes\nedited\n" },
+    });
+
+    render(<App Editor={EditableFake} saveDelayMs={0} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    // Editing through the seam fires the note's onChange.
+    fireEvent.click(await screen.findByTestId("editor-edit"));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        NOTE_PATH,
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+
+    // The POST body carries the note identity and the edited Markdown.
+    const post = vi
+      .mocked(fetch)
+      .mock.calls.find(
+        ([url, init]) =>
+          url === NOTE_PATH && (init as RequestInit | undefined)?.method === "POST",
+      );
+    const body = JSON.parse((post?.[1] as RequestInit).body as string);
+    expect(body).toEqual({ path: "notes", markdown: "# Notes\nedited\n" });
   });
 });

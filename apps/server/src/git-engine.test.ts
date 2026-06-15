@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { readNote, readNoteTree } from "@stout/core";
+import { readNote, readNoteTree, writeNote } from "@stout/core";
 import {
   ensureWorkspaceRepo,
   loadRepoPaths,
@@ -155,6 +155,81 @@ describe("NodeGitEngine.readNoteFile + readNote", () => {
     await ensureWorkspaceRepo(paths);
     const engine = new NodeGitEngine(paths.cloneDir);
     expect(await engine.readNoteFile("../../etc/passwd")).toBeNull();
+  });
+});
+
+describe("NodeGitEngine.writeNoteFile + writeNote", () => {
+  it("writes an edited note, commits it to main, and shows in git log", async () => {
+    await ensureWorkspaceRepo(paths);
+    const engine = new NodeGitEngine(paths.cloneDir);
+
+    const saved = await writeNote(engine, "", "# Home\n\nEdited **bold**.\n");
+    expect(saved).toMatchObject({ path: "", file: "_index.md" });
+
+    // The committed working-clone file holds the canonical Markdown; a reload
+    // (readNote) shows the persisted content.
+    expect((await readNote(engine, ""))?.markdown).toBe(
+      "# Home\n\nEdited **bold**.\n",
+    );
+
+    // git log shows the commit on main.
+    const { stdout } = await run("git", [
+      "-C",
+      paths.cloneDir,
+      "log",
+      "--oneline",
+      "main",
+    ]);
+    expect(stdout).toContain("Edit _index.md");
+  });
+
+  it("canonicalizes loose Markdown before committing it", async () => {
+    await ensureWorkspaceRepo(paths);
+    const engine = new NodeGitEngine(paths.cloneDir);
+
+    await writeNote(engine, "", "#  Home\n\n*  one\n+  two\n");
+
+    expect((await readNote(engine, ""))?.markdown).toBe(
+      "# Home\n\n- one\n- two\n",
+    );
+  });
+
+  it("creates a new leaf note's file and tracks it", async () => {
+    await ensureWorkspaceRepo(paths);
+    const engine = new NodeGitEngine(paths.cloneDir);
+
+    await writeNote(engine, "fresh", "# Fresh\n\n- [ ] todo\n");
+
+    const files = (await engine.listNoteFiles()).map((f) => f.path).sort();
+    expect(files).toEqual(["_index.md", "fresh.md"]);
+    expect((await readNote(engine, "fresh"))?.markdown).toBe(
+      "# Fresh\n\n- [ ] todo\n",
+    );
+  });
+
+  it("does not create an empty commit when content is unchanged", async () => {
+    await ensureWorkspaceRepo(paths);
+    const engine = new NodeGitEngine(paths.cloneDir);
+    const head = async (): Promise<string> =>
+      (
+        await run("git", ["-C", paths.cloneDir, "rev-parse", "HEAD"])
+      ).stdout.trim();
+
+    const before = await head();
+    // Re-writing the starter note's exact current bytes is a no-op.
+    const current = (await readNote(engine, ""))!.markdown;
+    await engine.writeNoteFile("_index.md", current, "no-op");
+
+    expect(await head()).toBe(before);
+  });
+
+  it("refuses to write outside the working clone", async () => {
+    await ensureWorkspaceRepo(paths);
+    const engine = new NodeGitEngine(paths.cloneDir);
+
+    await expect(
+      engine.writeNoteFile("../escape.md", "x", "nope"),
+    ).rejects.toThrow(/outside the working clone/u);
   });
 });
 

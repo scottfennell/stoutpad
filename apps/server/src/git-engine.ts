@@ -4,9 +4,10 @@
  * This is the only place that touches the filesystem and the `git` binary. It
  * (1) initializes the on-disk storage on first boot — a **bare repo** (the
  * canonical store / future Git remote) plus a **working clone** seeded with a
- * starter `_index.md` — and (2) implements the pure {@link GitEngine} read seam
- * by listing the Markdown files tracked in the working clone and reading a single
- * note file's content (with a guard against path escapes).
+ * starter `_index.md` — and (2) implements the {@link WritableGitEngine} seam by
+ * listing the Markdown files tracked in the working clone, reading a single note
+ * file's content, and writing + committing an edited note to `main` (all
+ * guarded against path escapes).
  *
  * We shell out to the system `git` rather than pulling in a Git library: local
  * bare/clone/commit/push are first-class in the CLI and add zero dependencies.
@@ -20,7 +21,11 @@ import { execFile } from "node:child_process";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import { INDEX_FILE, type GitEngine, type NoteFile } from "@stout/core";
+import {
+  INDEX_FILE,
+  type NoteFile,
+  type WritableGitEngine,
+} from "@stout/core";
 
 const run = promisify(execFile);
 
@@ -78,8 +83,8 @@ export async function ensureWorkspaceRepo(paths: RepoPaths): Promise<void> {
   await run("git", ["-C", paths.cloneDir, "push", "-u", "origin", "main"]);
 }
 
-/** {@link GitEngine} backed by a Git working clone on the local filesystem. */
-export class NodeGitEngine implements GitEngine {
+/** {@link WritableGitEngine} backed by a Git working clone on the local filesystem. */
+export class NodeGitEngine implements WritableGitEngine {
   constructor(private readonly cloneDir: string) {}
 
   async listNoteFiles(): Promise<NoteFile[]> {
@@ -91,16 +96,47 @@ export class NodeGitEngine implements GitEngine {
   }
 
   async readNoteFile(path: string): Promise<string | null> {
-    // Resolve under the clone root and reject anything that escapes it, so a
-    // crafted `path` query can never read outside the working clone.
-    const root = resolve(this.cloneDir);
-    const full = resolve(root, path);
-    if (full !== root && !full.startsWith(root + sep)) return null;
+    const full = this.resolveInClone(path);
+    if (full === null) return null;
     try {
       return await readFile(full, "utf8");
     } catch {
       return null;
     }
+  }
+
+  async writeNoteFile(path: string, content: string, message: string): Promise<void> {
+    const full = this.resolveInClone(path);
+    if (full === null) {
+      throw new Error(`refusing to write outside the working clone: ${path}`);
+    }
+    await mkdir(dirname(full), { recursive: true });
+    await writeFile(full, content, "utf8");
+    await run("git", ["-C", this.cloneDir, "add", "--", path]);
+    // Skip the commit when nothing changed, so a no-op save never errors on an
+    // empty commit (commit-on-save is idempotent at the git level too).
+    const { stdout } = await run("git", [
+      "-C",
+      this.cloneDir,
+      "status",
+      "--porcelain",
+      "--",
+      path,
+    ]);
+    if (stdout.trim() === "") return;
+    await run("git", ["-C", this.cloneDir, "commit", "-m", message, "--", path]);
+  }
+
+  /**
+   * Resolve a repo-relative path under the clone root, rejecting anything that
+   * escapes it, so a crafted `path` can never read or write outside the clone.
+   * Returns `null` when the path escapes (reads treat that as "missing").
+   */
+  private resolveInClone(path: string): string | null {
+    const root = resolve(this.cloneDir);
+    const full = resolve(root, path);
+    if (full !== root && !full.startsWith(root + sep)) return null;
+    return full;
   }
 }
 

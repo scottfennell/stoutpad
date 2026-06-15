@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   HEALTH_PATH,
   NOTE_PATH,
@@ -6,6 +6,7 @@ import {
   type HealthStatus,
   type NoteContentResponse,
   type NoteNode,
+  type NoteSaveRequest,
   type NoteTreeResponse,
 } from "@stout/core";
 import { TipTapEditor } from "./TipTapEditor.js";
@@ -125,6 +126,54 @@ export function useNote(
   return result;
 }
 
+/**
+ * Persist a note's edited Markdown via `POST /api/note`. The server canonicalizes
+ * and commits it; the response carries the canonical Markdown the editor adopts.
+ */
+export async function postNote(
+  path: string,
+  markdown: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<NoteContentResponse> {
+  const res = await fetchImpl(NOTE_PATH, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path, markdown } satisfies NoteSaveRequest),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as NoteContentResponse;
+}
+
+/**
+ * A debounced note saver: coalesces rapid edits into a single `POST /api/note`
+ * once the user pauses for `delayMs`. This is the minimal "save on edit" wiring
+ * for this slice; richer autosave/squash semantics land in #6.
+ */
+export function useDebouncedSave(
+  delayMs = 600,
+  fetchImpl: typeof fetch = fetch,
+): (path: string, markdown: string) => void {
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(
+    () => () => {
+      if (timer.current !== null) clearTimeout(timer.current);
+    },
+    [],
+  );
+
+  return useCallback(
+    (path: string, markdown: string) => {
+      if (timer.current !== null) clearTimeout(timer.current);
+      timer.current = setTimeout(() => {
+        // Best-effort for this slice; surfacing save errors is part of #6.
+        void postNote(path, markdown, fetchImpl).catch(() => undefined);
+      }, delayMs);
+    },
+    [delayMs, fetchImpl],
+  );
+}
+
 function NoteTreeItem({
   node,
   selectedPath,
@@ -215,11 +264,14 @@ function NavPanel({
 function NotePanel({
   selectedPath,
   Editor,
+  saveDelayMs,
 }: {
   selectedPath: string | null;
   Editor: EditorComponent;
+  saveDelayMs?: number;
 }) {
   const result = useNote(selectedPath);
+  const save = useDebouncedSave(saveDelayMs);
 
   return (
     <section aria-label="Note" style={{ marginBottom: "2rem" }}>
@@ -232,7 +284,10 @@ function NotePanel({
       )}
       {result.state === "ready" && (
         <article data-testid="note-content" data-note-path={result.note.path}>
-          <Editor markdown={result.note.markdown} />
+          <Editor
+            markdown={result.note.markdown}
+            onChange={(markdown) => save(result.note.path, markdown)}
+          />
         </article>
       )}
     </section>
@@ -242,9 +297,14 @@ function NotePanel({
 export interface AppProps {
   /** Swappable editor seam; defaults to the TipTap implementation. */
   Editor?: EditorComponent;
+  /**
+   * Debounce (ms) before an edit is persisted via `POST /api/note`. Defaults to
+   * the {@link useDebouncedSave} default; tests pass a small value for determinism.
+   */
+  saveDelayMs?: number;
 }
 
-export function App({ Editor = TipTapEditor }: AppProps = {}) {
+export function App({ Editor = TipTapEditor, saveDelayMs }: AppProps = {}) {
   const result = useHealth();
   const [selected, setSelected] = useState<string | null>(null);
 
@@ -259,7 +319,11 @@ export function App({ Editor = TipTapEditor }: AppProps = {}) {
       <NavPanel selectedPath={selected} onSelect={setSelected} />
       <main style={{ flex: 1, padding: "2rem" }}>
         <h1>Stout</h1>
-        <NotePanel selectedPath={selected} Editor={Editor} />
+        <NotePanel
+          selectedPath={selected}
+          Editor={Editor}
+          saveDelayMs={saveDelayMs}
+        />
         <section>
           <h2>Service health</h2>
           {result.state === "loading" && <p>Checking health…</p>}

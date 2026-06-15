@@ -182,3 +182,45 @@ export function parseInline(text: string): MarkdownSpan[] {
 export function spansToPlainText(spans: MarkdownSpan[]): string {
   return spans.map((span) => span.text).join("");
 }
+
+/** Serialize a single block to its one-or-more canonical Markdown lines. */
+function serializeBlock(block: MarkdownBlock): string {
+  switch (block.type) {
+    case "heading":
+      return `${"#".repeat(block.level)} ${block.text}`;
+    case "paragraph":
+      return block.text;
+    case "bulletList":
+      return block.items.map((item) => `- ${item}`).join("\n");
+    case "taskList":
+      return block.items
+        .map((item) => `- [${item.checked ? "x" : " "}] ${item.text}`)
+        .join("\n");
+  }
+}
+
+/**
+ * Serialize a parsed note back to **canonical** CommonMark + GFM.
+ *
+ * This is the inverse of {@link parseMarkdown} and the heart of "Markdown is the
+ * canonical representation": the same logical content always yields byte-identical
+ * Markdown, so saving an edit produces a stable, diff-friendly file. The output is:
+ *
+ * - ATX headings (`#`…`######` + a single space),
+ * - one blank line between blocks,
+ * - `-` bullet markers, `- [x]`/`- [ ]` GFM task markers,
+ * - a single trailing newline (and the empty string for an empty note).
+ *
+ * It is **deterministic** (no ambient state) and **idempotent**: feeding the
+ * result back through {@link parseMarkdown} and serializing again is byte-stable
+ * (`serialize(parse(serialize(x))) === serialize(x)`). Inline content is emitted
+ * verbatim, so callers should pass the block model produced by
+ * {@link parseMarkdown} (whose block text is already single-line and normalized).
+ */
+export function serializeMarkdown(
+  input: MarkdownDocument | MarkdownBlock[],
+): string {
+  const blocks = Array.isArray(input) ? input : input.blocks;
+  const body = blocks.map(serializeBlock).join("\n\n").trim();
+  return body.length > 0 ? `${body}\n` : "";
+}
