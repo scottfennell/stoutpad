@@ -19,7 +19,7 @@ import {
   normalizeNotePath,
   type NoteContentResponse,
 } from "./note-content.js";
-import { parseMarkdown, serializeMarkdown } from "./markdown.js";
+import { canonicalizeMarkdown } from "./markdown.js";
 
 /** Reads the note files from a Git working clone. */
 export interface GitEngine {
@@ -92,9 +92,10 @@ export async function readNote(
  * Prefers the note's existing backing file (so editing a parent note writes its
  * `_index.md`, not a sibling leaf), falling back to the leaf candidate (`path.md`,
  * or the root `_index.md`) when the note does not exist yet. Pure but for the
- * existence probes through the engine.
+ * existence probes through the engine. Shared by commit-on-save ({@link writeNote})
+ * and the Node engine's wip autosave so both target the same backing file.
  */
-async function resolveWriteTarget(
+export async function resolveWriteTarget(
   engine: GitEngine,
   notePath: string,
 ): Promise<string> {
@@ -108,20 +109,19 @@ async function resolveWriteTarget(
 /**
  * Persist a note's edited Markdown via the injected {@link WritableGitEngine}.
  *
- * The Markdown is **canonicalized** ({@link serializeMarkdown} ∘
- * {@link parseMarkdown}) before it is written, so the committed file is always
- * byte-stable canonical CommonMark + GFM. Resolves the note identity to its
- * backing file, writes + commits it to `main`, and returns the saved
- * {@link NoteContentResponse} (carrying the canonical Markdown the client should
- * adopt). The canonicalization and identity → file resolution stay pure; only the
- * write/commit touches the engine.
+ * The Markdown is **canonicalized** ({@link canonicalizeMarkdown}) before it is
+ * written, so the committed file is always byte-stable canonical CommonMark + GFM.
+ * Resolves the note identity to its backing file, writes + commits it to `main`,
+ * and returns the saved {@link NoteContentResponse} (carrying the canonical
+ * Markdown the client should adopt). The canonicalization and identity → file
+ * resolution stay pure; only the write/commit touches the engine.
  */
 export async function writeNote(
   engine: WritableGitEngine,
   notePath: string,
   markdown: string,
 ): Promise<NoteContentResponse> {
-  const canonical = serializeMarkdown(parseMarkdown(markdown));
+  const canonical = canonicalizeMarkdown(markdown);
   const file = await resolveWriteTarget(engine, notePath);
   await engine.writeNoteFile(file, canonical, `Edit ${file}`);
   return { path: normalizeNotePath(notePath), file, markdown: canonical };

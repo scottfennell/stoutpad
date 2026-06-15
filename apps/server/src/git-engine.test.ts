@@ -233,6 +233,172 @@ describe("NodeGitEngine.writeNoteFile + writeNote", () => {
   });
 });
 
+describe("NodeGitEngine wip-branch lifecycle (autosave + squash)", () => {
+  async function branchExists(dir: string, branch: string): Promise<boolean> {
+    try {
+      await run("git", [
+        "-C",
+        dir,
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        `refs/heads/${branch}`,
+      ]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Commit subjects on a ref, newest first. */
+  async function subjects(dir: string, ref: string): Promise<string[]> {
+    const { stdout } = await run("git", ["-C", dir, "log", "--format=%s", ref]);
+    return stdout.split("\n").filter((line) => line.length > 0);
+  }
+
+  async function currentBranch(dir: string): Promise<string> {
+    const { stdout } = await run("git", [
+      "-C",
+      dir,
+      "rev-parse",
+      "--abbrev-ref",
+      "HEAD",
+    ]);
+    return stdout.trim();
+  }
+
+  it("autosaves onto wip/<note>, leaving main and the working tree on main", async () => {
+    await ensureWorkspaceRepo(paths);
+    const engine = new NodeGitEngine(paths.cloneDir);
+
+    await engine.commitToWip("notes", "# Notes\n\nDraft\n");
+
+    // The wip branch exists and carries the autosave commit...
+    expect(await branchExists(paths.cloneDir, "wip/notes")).toBe(true);
+    expect(await subjects(paths.cloneDir, "wip/notes")).toContain("Autosave notes.md");
+    const { stdout: wipFile } = await run("git", [
+      "-C",
+      paths.cloneDir,
+      "show",
+      "wip/notes:notes.md",
+    ]);
+    expect(wipFile).toBe("# Notes\n\nDraft\n");
+
+    // ...but main is untouched: the clone is back on main, where the note does
+    // not exist yet (it lives only on the wip branch).
+    expect(await currentBranch(paths.cloneDir)).toBe("main");
+    expect(await readNote(engine, "notes")).toBeNull();
+  });
+
+  it("appends each autosave to the same wip branch", async () => {
+    await ensureWorkspaceRepo(paths);
+    const engine = new NodeGitEngine(paths.cloneDir);
+
+    await engine.commitToWip("notes", "# Notes\n\nA\n");
+    await engine.commitToWip("notes", "# Notes\n\nA\n\nB\n");
+
+    const autosaves = (await subjects(paths.cloneDir, "wip/notes")).filter(
+      (subject) => subject === "Autosave notes.md",
+    );
+    expect(autosaves).toHaveLength(2);
+  });
+
+  it("skips an empty wip commit when the content is unchanged", async () => {
+    await ensureWorkspaceRepo(paths);
+    const engine = new NodeGitEngine(paths.cloneDir);
+    // Put canonical content on main first, then autosave the identical content.
+    await writeNote(engine, "notes", "# Notes\n\nHi\n");
+
+    await engine.commitToWip("notes", "# Notes\n\nHi\n");
+
+    // The branch was created at main but no commit was added on top of it.
+    const { stdout: wipRev } = await run("git", [
+      "-C",
+      paths.cloneDir,
+      "rev-parse",
+      "wip/notes",
+    ]);
+    const { stdout: mainRev } = await run("git", [
+      "-C",
+      paths.cloneDir,
+      "rev-parse",
+      "main",
+    ]);
+    expect(wipRev.trim()).toBe(mainRev.trim());
+  });
+
+  it("squash-merges a session into one main commit and deletes the wip branch", async () => {
+    await ensureWorkspaceRepo(paths);
+    const engine = new NodeGitEngine(paths.cloneDir);
+    const mainBefore = (await subjects(paths.cloneDir, "main")).length;
+
+    for (const body of ["A", "A\n\nB", "A\n\nB\n\nC"]) {
+      await engine.commitToWip("notes", `# Notes\n\n${body}\n`);
+    }
+    await engine.squashMergeWipToMain("notes", "Edit notes");
+    await engine.deleteWip("notes");
+
+    // Exactly one new commit on main despite three wip autosaves.
+    const mainSubjects = await subjects(paths.cloneDir, "main");
+    expect(mainSubjects.length).toBe(mainBefore + 1);
+    expect(mainSubjects[0]).toBe("Edit notes");
+    // The squashed content landed on main and the wip branch is gone.
+    expect((await readNote(engine, "notes"))?.markdown).toBe("# Notes\n\nA\n\nB\n\nC\n");
+    expect(await branchExists(paths.cloneDir, "wip/notes")).toBe(false);
+
+    // It is a plain commit (a single parent), not a merge commit, so main stays
+    // linear — one meaningful commit per editing session.
+    const { stdout: parents } = await run("git", [
+      "-C",
+      paths.cloneDir,
+      "rev-list",
+      "--parents",
+      "-n",
+      "1",
+      "HEAD",
+    ]);
+    expect(parents.trim().split(/\s+/u)).toHaveLength(2);
+  });
+
+  it("squashMergeWipToMain and deleteWip are no-ops without a wip branch", async () => {
+    await ensureWorkspaceRepo(paths);
+    const engine = new NodeGitEngine(paths.cloneDir);
+    const before = (await subjects(paths.cloneDir, "main")).length;
+
+    await engine.squashMergeWipToMain("ghost", "nothing to squash");
+    await engine.deleteWip("ghost");
+
+    expect((await subjects(paths.cloneDir, "main")).length).toBe(before);
+  });
+
+  it("never publishes a wip branch to the bare repo (never pushed)", async () => {
+    await ensureWorkspaceRepo(paths);
+    const engine = new NodeGitEngine(paths.cloneDir);
+
+    await engine.commitToWip("notes", "# Notes\n\nP\n");
+    // Mid-session the wip branch is local-only: the bare repo has no wip ref.
+    const mid = await run("git", [
+      "-C",
+      paths.bareDir,
+      "for-each-ref",
+      "--format=%(refname)",
+    ]);
+    expect(mid.stdout).not.toContain("wip/");
+
+    await engine.squashMergeWipToMain("notes", "Edit notes");
+    await engine.deleteWip("notes");
+
+    // After the session the bare repo still holds no wip ref anywhere.
+    const after = await run("git", [
+      "-C",
+      paths.bareDir,
+      "for-each-ref",
+      "--format=%(refname)",
+    ]);
+    expect(after.stdout).not.toContain("wip/");
+  });
+});
+
 describe("loadRepoPaths", () => {
   it("derives bare + clone paths under STOUT_DATA_DIR", () => {
     expect(loadRepoPaths({ STOUT_DATA_DIR: "/data" })).toEqual({

@@ -4,11 +4,15 @@ import express, { type Express } from "express";
 import {
   HEALTH_PATH,
   NOTE_PATH,
+  SYNC_PATH,
   TREE_PATH,
   type HealthStatus,
   type NoteContentResponse,
   type NoteSaveRequest,
+  type NoteSyncRequest,
+  type NoteSyncResponse,
   type NoteTreeResponse,
+  type SyncAction,
 } from "@stout/core";
 
 export interface AppDeps {
@@ -31,8 +35,20 @@ export interface AppDeps {
    * without a real repo. Omit to skip mounting the save endpoint.
    */
   saveNote?: (path: string, markdown: string) => Promise<NoteContentResponse>;
+  /**
+   * Apply one wip-branch sync action (autosave / squash / delete-wip) for the
+   * autosave state machine, returning the action's result. Injected so HTTP
+   * behavior is tested without a real repo. Omit to skip mounting the sync
+   * endpoint.
+   */
+  syncNote?: (request: NoteSyncRequest) => Promise<NoteSyncResponse>;
   /** Absolute path to the built UI assets. Omit to skip static hosting. */
   uiDir?: string;
+}
+
+/** Whether `value` is one of the three valid wip-branch sync actions. */
+function isSyncAction(value: unknown): value is SyncAction {
+  return value === "autosave" || value === "squash" || value === "delete-wip";
 }
 
 /** Resolve the directory holding the built `@stout/ui` SPA assets. */
@@ -109,6 +125,43 @@ export function createApp(deps: AppDeps): Express {
       }
       try {
         res.json(await saveNote(path, body.markdown));
+      } catch (err) {
+        res.status(500).json({
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+  }
+
+  if (deps.syncNote) {
+    const syncNote = deps.syncNote;
+    // `POST /api/note/sync` drives one wip-branch operation per request: commit a
+    // debounced edit to the note's wip branch (`autosave`), squash that branch
+    // into `main` (`squash`), or delete it (`delete-wip`). The client's NoteSync
+    // stays the orchestrator; the server just performs the requested atomic step.
+    app.post(SYNC_PATH, express.json({ limit: "5mb" }), async (req, res) => {
+      const body = (req.body ?? {}) as Partial<NoteSyncRequest>;
+      // The root note has the empty-string identity, so a missing `path` targets it.
+      const path = typeof body.path === "string" ? body.path : "";
+      if (!isSyncAction(body.action)) {
+        res
+          .status(400)
+          .json({ error: "action must be one of: autosave, squash, delete-wip" });
+        return;
+      }
+      if (body.action === "autosave" && typeof body.markdown !== "string") {
+        res.status(400).json({ error: "markdown (string) is required for autosave" });
+        return;
+      }
+      try {
+        res.json(
+          await syncNote({
+            path,
+            action: body.action,
+            markdown: body.markdown,
+            message: body.message,
+          }),
+        );
       } catch (err) {
         res.status(500).json({
           error: err instanceof Error ? err.message : String(err),

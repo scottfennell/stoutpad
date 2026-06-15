@@ -23,8 +23,11 @@ import { dirname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import {
   INDEX_FILE,
+  canonicalizeMarkdown,
+  resolveWriteTarget,
+  wipBranchName,
   type NoteFile,
-  type WritableGitEngine,
+  type WipGitEngine,
 } from "@stout/core";
 
 const run = promisify(execFile);
@@ -83,12 +86,23 @@ export async function ensureWorkspaceRepo(paths: RepoPaths): Promise<void> {
   await run("git", ["-C", paths.cloneDir, "push", "-u", "origin", "main"]);
 }
 
-/** {@link WritableGitEngine} backed by a Git working clone on the local filesystem. */
-export class NodeGitEngine implements WritableGitEngine {
+/**
+ * {@link WipGitEngine} backed by a Git working clone on the local filesystem.
+ *
+ * On top of commit-on-save (`writeNoteFile` → `main`) it implements the
+ * ephemeral wip-branch lifecycle the autosave state machine drives:
+ * {@link commitToWip} appends an autosave commit to `wip/<note>` (created from
+ * `main` on the first commit of a session), {@link squashMergeWipToMain} folds
+ * the whole session onto `main` as one commit, and {@link deleteWip} removes the
+ * branch. Wip branches are local-only — nothing here pushes, so they are never
+ * published. Every method restores the clone to a clean `main` checkout, so the
+ * working tree the read/commit-on-save paths see is always `main`.
+ */
+export class NodeGitEngine implements WipGitEngine {
   constructor(private readonly cloneDir: string) {}
 
   async listNoteFiles(): Promise<NoteFile[]> {
-    const { stdout } = await run("git", ["-C", this.cloneDir, "ls-files", "-z"]);
+    const { stdout } = await this.git(["ls-files", "-z"]);
     return stdout
       .split("\0")
       .filter((path) => path.length > 0 && path.toLowerCase().endsWith(".md"))
@@ -112,19 +126,118 @@ export class NodeGitEngine implements WritableGitEngine {
     }
     await mkdir(dirname(full), { recursive: true });
     await writeFile(full, content, "utf8");
-    await run("git", ["-C", this.cloneDir, "add", "--", path]);
+    await this.git(["add", "--", path]);
     // Skip the commit when nothing changed, so a no-op save never errors on an
     // empty commit (commit-on-save is idempotent at the git level too).
-    const { stdout } = await run("git", [
-      "-C",
-      this.cloneDir,
-      "status",
-      "--porcelain",
-      "--",
-      path,
-    ]);
-    if (stdout.trim() === "") return;
-    await run("git", ["-C", this.cloneDir, "commit", "-m", message, "--", path]);
+    if (await this.isClean(path)) return;
+    await this.git(["commit", "-m", message, "--", path]);
+  }
+
+  /** Ref name of the note's wip branch (see core `wipBranchName`). */
+  wipBranchName(notePath: string): string {
+    return wipBranchName(notePath);
+  }
+
+  /**
+   * Commit `markdown` onto the note's `wip/<note>` branch, creating it from
+   * `main` on the first commit of a session and appending to it thereafter. The
+   * Markdown is canonicalized (idempotently — the state machine already sends
+   * canonical content) and written to the note's stable backing file (resolved
+   * against `main`). A commit that changes nothing is skipped, so no empty wip
+   * commit is created. The clone is always returned to a clean `main` checkout.
+   */
+  async commitToWip(notePath: string, markdown: string): Promise<void> {
+    const file = await resolveWriteTarget(this, notePath);
+    const full = this.resolveInClone(file);
+    if (full === null) {
+      throw new Error(`refusing to write outside the working clone: ${file}`);
+    }
+    const canonical = canonicalizeMarkdown(markdown);
+    const branch = wipBranchName(notePath);
+    try {
+      await this.checkoutWip(branch);
+      await mkdir(dirname(full), { recursive: true });
+      await writeFile(full, canonical, "utf8");
+      await this.git(["add", "--", file]);
+      if (!(await this.isClean(file))) {
+        await this.git(["commit", "-m", `Autosave ${file}`, "--", file]);
+      }
+    } finally {
+      await this.checkoutMain();
+    }
+  }
+
+  /**
+   * Squash-merge the note's wip branch into `main` as a single commit with
+   * `message`. A no-op when the branch does not exist or holds no net change vs
+   * `main` (no empty commit). Produces a plain commit (not a merge commit), so
+   * `main` stays linear — one commit per editing session.
+   */
+  async squashMergeWipToMain(notePath: string, message: string): Promise<void> {
+    const branch = wipBranchName(notePath);
+    if (!(await this.branchExists(branch))) return;
+    await this.checkoutMain();
+    await this.git(["merge", "--squash", branch]);
+    if (await this.isClean()) return;
+    await this.git(["commit", "-m", message]);
+  }
+
+  /** Delete the note's wip branch (idempotent if it does not exist). */
+  async deleteWip(notePath: string): Promise<void> {
+    const branch = wipBranchName(notePath);
+    if (!(await this.branchExists(branch))) return;
+    if ((await this.currentBranch()) === branch) {
+      await this.checkoutMain();
+    }
+    await this.git(["branch", "-D", branch]);
+  }
+
+  /** Run a `git` subcommand in the working clone. */
+  private git(args: string[]): Promise<{ stdout: string; stderr: string }> {
+    return run("git", ["-C", this.cloneDir, ...args]);
+  }
+
+  /** Whether the working tree is clean (optionally scoped to one `path`). */
+  private async isClean(path?: string): Promise<boolean> {
+    const args = ["status", "--porcelain"];
+    if (path !== undefined) args.push("--", path);
+    const { stdout } = await this.git(args);
+    return stdout.trim() === "";
+  }
+
+  /** Check out the wip branch, creating it from `main` when it does not exist. */
+  private async checkoutWip(branch: string): Promise<void> {
+    if (await this.branchExists(branch)) {
+      await this.git(["checkout", branch]);
+    } else {
+      await this.git(["checkout", "-b", branch, "main"]);
+    }
+  }
+
+  /**
+   * Force the clone back onto a clean `main`. Used after every wip operation so
+   * the shared working tree is a stable `main` baseline for the next request;
+   * the force also recovers from a half-applied squash on an error path (it only
+   * discards uncommitted working-tree state, never commits).
+   */
+  private async checkoutMain(): Promise<void> {
+    await this.git(["checkout", "-f", "main"]);
+  }
+
+  /** Whether a local branch ref exists. */
+  private async branchExists(branch: string): Promise<boolean> {
+    try {
+      await this.git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Name of the branch currently checked out in the clone. */
+  private async currentBranch(): Promise<string> {
+    const { stdout } = await this.git(["rev-parse", "--abbrev-ref", "HEAD"]);
+    return stdout.trim();
   }
 
   /**

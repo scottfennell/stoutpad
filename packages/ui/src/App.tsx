@@ -1,15 +1,17 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  DEFAULT_DEBOUNCE_MS,
   HEALTH_PATH,
   NOTE_PATH,
+  NoteSync,
   TREE_PATH,
   type HealthStatus,
   type NoteContentResponse,
   type NoteNode,
-  type NoteSaveRequest,
   type NoteTreeResponse,
 } from "@stout/core";
 import { TipTapEditor } from "./TipTapEditor.js";
+import { createHttpWipEngine } from "./sync-client.js";
 import type { EditorComponent } from "./editor.js";
 
 type Fetched =
@@ -127,50 +129,77 @@ export function useNote(
 }
 
 /**
- * Persist a note's edited Markdown via `POST /api/note`. The server canonicalizes
- * and commits it; the response carries the canonical Markdown the editor adopts.
+ * Wire the editor to the autosave + wip-squash {@link NoteSync} state machine.
+ *
+ * Returns the editor's `onChange` handler. Each change buffers the edit and
+ * (re)starts a real debounce timer; when it fires, the edit is flushed to the
+ * note's `wip/<note>` branch (`POST /api/note/sync`). The session is squash-
+ * merged into `main` when focus leaves — the tab blurs, the page is hidden or
+ * unloaded, or the note is switched/unmounted — yielding one commit per editing
+ * session. Crash-safe: edits live as wip commits before any squash. When
+ * `notePath` is `null` (nothing loaded) the handler is inert.
  */
-export async function postNote(
-  path: string,
-  markdown: string,
-  fetchImpl: typeof fetch = fetch,
-): Promise<NoteContentResponse> {
-  const res = await fetchImpl(NOTE_PATH, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ path, markdown } satisfies NoteSaveRequest),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return (await res.json()) as NoteContentResponse;
-}
-
-/**
- * A debounced note saver: coalesces rapid edits into a single `POST /api/note`
- * once the user pauses for `delayMs`. This is the minimal "save on edit" wiring
- * for this slice; richer autosave/squash semantics land in #6.
- */
-export function useDebouncedSave(
-  delayMs = 600,
-  fetchImpl: typeof fetch = fetch,
-): (path: string, markdown: string) => void {
+export function useNoteSync(
+  notePath: string | null,
+  initialMarkdown: string,
+  options: { debounceMs?: number; fetchImpl?: typeof fetch } = {},
+): (markdown: string) => void {
+  const { debounceMs = DEFAULT_DEBOUNCE_MS, fetchImpl } = options;
+  const engine = useMemo(() => createHttpWipEngine(fetchImpl ?? fetch), [fetchImpl]);
+  const syncRef = useRef<NoteSync | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(
-    () => () => {
-      if (timer.current !== null) clearTimeout(timer.current);
-    },
-    [],
-  );
+  const clearTimer = useCallback(() => {
+    if (timer.current !== null) {
+      clearTimeout(timer.current);
+      timer.current = null;
+    }
+  }, []);
+
+  // One session per loaded note. Ending it (here, and on the session-end events)
+  // flushes any buffered edit and squashes the wip branch into `main`; the core
+  // machine makes a redundant end a no-op, so overlapping triggers are safe.
+  useEffect(() => {
+    if (notePath === null) {
+      syncRef.current = null;
+      return;
+    }
+    const sync = new NoteSync(engine, notePath, { debounceMs, initialMarkdown });
+    syncRef.current = sync;
+
+    const endSession = (): void => {
+      clearTimer();
+      void sync.onFocusLeave().catch(() => undefined);
+    };
+    const onVisibility = (): void => {
+      if (document.visibilityState === "hidden") endSession();
+    };
+    window.addEventListener("blur", endSession);
+    window.addEventListener("pagehide", endSession);
+    document.addEventListener("visibilitychange", onVisibility);
+
+    return () => {
+      window.removeEventListener("blur", endSession);
+      window.removeEventListener("pagehide", endSession);
+      document.removeEventListener("visibilitychange", onVisibility);
+      // Switching notes or unmounting ends (and squashes) the current session.
+      endSession();
+      syncRef.current = null;
+    };
+  }, [engine, notePath, initialMarkdown, debounceMs, clearTimer]);
 
   return useCallback(
-    (path: string, markdown: string) => {
-      if (timer.current !== null) clearTimeout(timer.current);
+    (markdown: string) => {
+      const sync = syncRef.current;
+      if (sync === null) return;
+      sync.onEdit(markdown);
+      clearTimer();
       timer.current = setTimeout(() => {
-        // Best-effort for this slice; surfacing save errors is part of #6.
-        void postNote(path, markdown, fetchImpl).catch(() => undefined);
-      }, delayMs);
+        timer.current = null;
+        void sync.flush().catch(() => undefined);
+      }, debounceMs);
     },
-    [delayMs, fetchImpl],
+    [debounceMs, clearTimer],
   );
 }
 
@@ -264,14 +293,21 @@ function NavPanel({
 function NotePanel({
   selectedPath,
   Editor,
-  saveDelayMs,
+  debounceMs,
 }: {
   selectedPath: string | null;
   Editor: EditorComponent;
-  saveDelayMs?: number;
+  debounceMs?: number;
 }) {
   const result = useNote(selectedPath);
-  const save = useDebouncedSave(saveDelayMs);
+  const ready = result.state === "ready";
+  // Drive the autosave/squash session off the loaded note. Keyed on the note's
+  // identity + its initial Markdown so switching notes ends the prior session.
+  const onChange = useNoteSync(
+    ready ? result.note.path : null,
+    ready ? result.note.markdown : "",
+    { debounceMs },
+  );
 
   return (
     <section aria-label="Note" style={{ marginBottom: "2rem" }}>
@@ -284,10 +320,7 @@ function NotePanel({
       )}
       {result.state === "ready" && (
         <article data-testid="note-content" data-note-path={result.note.path}>
-          <Editor
-            markdown={result.note.markdown}
-            onChange={(markdown) => save(result.note.path, markdown)}
-          />
+          <Editor markdown={result.note.markdown} onChange={onChange} />
         </article>
       )}
     </section>
@@ -298,13 +331,14 @@ export interface AppProps {
   /** Swappable editor seam; defaults to the TipTap implementation. */
   Editor?: EditorComponent;
   /**
-   * Debounce (ms) before an edit is persisted via `POST /api/note`. Defaults to
-   * the {@link useDebouncedSave} default; tests pass a small value for determinism.
+   * Idle debounce (ms) before a buffered edit is autosaved to the note's wip
+   * branch. Defaults to {@link DEFAULT_DEBOUNCE_MS}; tests pass a small value for
+   * determinism.
    */
-  saveDelayMs?: number;
+  debounceMs?: number;
 }
 
-export function App({ Editor = TipTapEditor, saveDelayMs }: AppProps = {}) {
+export function App({ Editor = TipTapEditor, debounceMs }: AppProps = {}) {
   const result = useHealth();
   const [selected, setSelected] = useState<string | null>(null);
 
@@ -322,7 +356,7 @@ export function App({ Editor = TipTapEditor, saveDelayMs }: AppProps = {}) {
         <NotePanel
           selectedPath={selected}
           Editor={Editor}
-          saveDelayMs={saveDelayMs}
+          debounceMs={debounceMs}
         />
         <section>
           <h2>Service health</h2>

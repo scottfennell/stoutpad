@@ -224,3 +224,18 @@ export function serializeMarkdown(
   const body = blocks.map(serializeBlock).join("\n\n").trim();
   return body.length > 0 ? `${body}\n` : "";
 }
+
+/**
+ * Canonicalize arbitrary Markdown: parse it and re-serialize it to the one
+ * **canonical** CommonMark + GFM form (`serializeMarkdown ∘ parseMarkdown`).
+ *
+ * This is the single round-trip used everywhere a note's bytes are persisted —
+ * commit-on-save ({@link writeNote}) and autosave-to-wip (`core/sync`) — so the
+ * same logical content always lands as byte-identical Markdown. Because
+ * {@link serializeMarkdown} is deterministic and idempotent, canonicalizing an
+ * already-canonical string is a no-op (`canonicalize(canonicalize(x)) ===
+ * canonicalize(x)`), making it safe to apply more than once along the save path.
+ */
+export function canonicalizeMarkdown(markdown: string): string {
+  return serializeMarkdown(parseMarkdown(markdown));
+}

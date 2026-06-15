@@ -11,9 +11,11 @@ import type { EditorComponent } from "./editor.js";
 import {
   HEALTH_PATH,
   NOTE_PATH,
+  SYNC_PATH,
   TREE_PATH,
   type HealthStatus,
   type NoteContentResponse,
+  type NoteSyncResponse,
   type NoteTreeResponse,
 } from "@stout/core";
 
@@ -140,7 +142,55 @@ describe("App", () => {
     );
   });
 
-  it("saves edits made through the Editor seam via POST /api/note", async () => {
+  it("autosaves edits to the note's wip branch via POST /api/note/sync", async () => {
+    const note: NoteContentResponse = {
+      path: "notes",
+      file: "notes.md",
+      markdown: "# Notes\n",
+    };
+    const syncResponse: NoteSyncResponse = {
+      path: "notes",
+      action: "autosave",
+      wipBranch: "wip/notes",
+    };
+    stubApi({
+      [HEALTH_PATH]: health,
+      [TREE_PATH]: tree,
+      [`${NOTE_PATH}?path=notes`]: note,
+      // Every wip-branch action posts to the bare sync path (no query string).
+      [SYNC_PATH]: syncResponse,
+    });
+
+    render(<App Editor={EditableFake} debounceMs={0} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    // Editing through the seam fires onChange → debounced autosave to wip.
+    fireEvent.click(await screen.findByTestId("editor-edit"));
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        SYNC_PATH,
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+
+    // The autosave posts the note identity, the autosave action, and the edited
+    // Markdown — never the old `POST /api/note` commit-on-save path.
+    const body = syncBodies()[0];
+    expect(body.action).toBe("autosave");
+    expect(body.path).toBe("notes");
+    expect(body.markdown).toContain("edited");
+    expect(
+      vi
+        .mocked(fetch)
+        .mock.calls.some(
+          ([url, init]) =>
+            url === NOTE_PATH && (init as RequestInit | undefined)?.method === "POST",
+        ),
+    ).toBe(false);
+  });
+
+  it("squash-merges the session into main when the window blurs", async () => {
     const note: NoteContentResponse = {
       path: "notes",
       file: "notes.md",
@@ -150,31 +200,32 @@ describe("App", () => {
       [HEALTH_PATH]: health,
       [TREE_PATH]: tree,
       [`${NOTE_PATH}?path=notes`]: note,
-      // The POST hits the bare `/api/note` key (no query string).
-      [NOTE_PATH]: { ...note, markdown: "# Notes\nedited\n" },
+      [SYNC_PATH]: { path: "notes", action: "autosave", wipBranch: "wip/notes" },
     });
 
-    render(<App Editor={EditableFake} saveDelayMs={0} />);
+    render(<App Editor={EditableFake} debounceMs={50} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    // Editing through the seam fires the note's onChange.
+    // Buffer an edit, then blur before the debounce fires: focus-leave flushes
+    // the pending edit to wip, then squashes the wip branch into main.
     fireEvent.click(await screen.findByTestId("editor-edit"));
+    window.dispatchEvent(new Event("blur"));
 
     await waitFor(() =>
-      expect(fetch).toHaveBeenCalledWith(
-        NOTE_PATH,
-        expect.objectContaining({ method: "POST" }),
+      expect(syncBodies().map((b) => b.action)).toEqual(
+        expect.arrayContaining(["autosave", "squash", "delete-wip"]),
       ),
     );
-
-    // The POST body carries the note identity and the edited Markdown.
-    const post = vi
-      .mocked(fetch)
-      .mock.calls.find(
-        ([url, init]) =>
-          url === NOTE_PATH && (init as RequestInit | undefined)?.method === "POST",
-      );
-    const body = JSON.parse((post?.[1] as RequestInit).body as string);
-    expect(body).toEqual({ path: "notes", markdown: "# Notes\nedited\n" });
   });
 });
+
+/** Parsed bodies of every `POST /api/note/sync` call, in order. */
+function syncBodies(): Array<{ path: string; action: string; markdown?: string }> {
+  return vi
+    .mocked(fetch)
+    .mock.calls.filter(
+      ([url, init]) =>
+        url === SYNC_PATH && (init as RequestInit | undefined)?.method === "POST",
+    )
+    .map(([, init]) => JSON.parse((init as RequestInit).body as string));
+}

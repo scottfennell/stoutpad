@@ -63,9 +63,46 @@ canonical serializer, writes the note's backing file in the **working clone**,
 and commits it to `main` via the **git engine** — one commit per save. A save
 that produces no change is a no-op (no empty commit), so commit-on-save is
 idempotent at the git level too. Reloading the note (`GET /api/note`) reflects
-the committed content, and `git log` shows the commit. (Coalescing rapid edits
-into fewer commits — autosave/squash — is a later slice; this slice persists each
-debounced edit.)
+the committed content, and `git log` shows the commit. (`POST /api/note` is the
+explicit-save verb; continuous editing now goes through **Autosave & squash**,
+which layers on top of the same canonicalize-and-commit machinery but targets a
+**WIP branch** instead of `main`.)
+
+### Editing session
+
+One note's continuous-edit lifecycle: it begins when a note is loaded for editing
+and ends on a **session-end** signal — focus leaving the note (tab blur, hiding,
+unload, or switching notes), an idle timeout, or the app quitting. Within a
+session, edits are buffered and autosaved to the note's **WIP branch**; ending
+the session squashes that branch into one `main` commit. So `main` carries one
+meaningful commit per editing session, not one per keystroke. Orchestrated by the
+pure `core/sync` state machine (`NoteSync`), which owns no real timer or git — it
+is driven through explicit `onEdit` / `tick` / `flush` / `onFocusLeave` /
+`onIdle` / `onQuit` calls against an injected clock and **wip engine**.
+
+### WIP branch
+
+An ephemeral, local-only Git branch (`wip/<note>`, e.g. `wip/root` for the root
+note) that holds a single editing session's in-progress autosave commits. Because
+the autosaves are real commits, in-progress work survives a reload or crash. WIP
+branches live only on the **working clone** and are **never pushed** — the sync
+seam exposes no push operation, so this holds by construction. A WIP branch is
+squash-merged into `main` and deleted when its session ends. An orphan WIP branch
+left by a crash is preserved (never silently deleted) and folds into the next
+editing session's squash.
+
+### Autosave & squash
+
+The two-phase persistence of an **editing session**. *Autosave*: a buffered edit
+is canonicalized and, after a debounce interval (~3s idle), committed onto the
+note's **WIP branch** (a no-op edit that reverts to the last saved content commits
+nothing). *Squash*: on session-end the WIP branch is squash-merged into `main` as
+one plain (non-merge) commit with a sensible message, then deleted. The pure
+machine lives in `core/sync`; in the browser it drives the wip engine over HTTP
+(`POST /api/note/sync`, actions `autosave` / `squash` / `delete-wip`, dispatched
+server-side by `applyNoteSync`), and the server's `NodeGitEngine` performs the
+real git. Builds on **Commit-on-save** (same canonical serializer + backing-file
+resolution); the difference is *where* and *how often* commits land.
 
 ### Editor seam
 
@@ -97,8 +134,11 @@ The deep module (`core/git-engine`) that reads and writes the working clone. The
 read contract (`GitEngine.listNoteFiles`/`readNoteFile`, `readNoteTree`/`readNote`)
 and the write contract (`WritableGitEngine.writeNoteFile`, plus the
 canonicalize-then-commit composition `writeNote`) live in `@stout/core`
-(runtime-agnostic); the Node implementation that touches the filesystem and the
-`git` binary (`NodeGitEngine`, `ensureWorkspaceRepo`) lives in `apps/server`.
+(runtime-agnostic), as does the narrow **wip engine** seam the autosave machine
+drives (`WipSyncEngine`: `commitToWip`/`squashMergeWipToMain`/`deleteWip`, with no
+push by design; `WipGitEngine` extends both). The Node implementation that touches
+the filesystem and the `git` binary (`NodeGitEngine`, `ensureWorkspaceRepo`) lives
+in `apps/server`.
 
 ### Health status
 
