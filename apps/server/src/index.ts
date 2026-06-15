@@ -1,6 +1,6 @@
 import type pg from "pg";
 import type { HealthStatus } from "@stout/core";
-import { readNoteTree } from "@stout/core";
+import { readNote, readNoteTree } from "@stout/core";
 import { createApp, resolveUiDir } from "./app.js";
 import {
   bootstrapDatabase,
@@ -50,6 +50,7 @@ async function main(): Promise<void> {
   const app = createApp({
     getHealth,
     getTree: () => readNoteTree(gitEngine),
+    getNote: (path) => readNote(gitEngine, path),
     uiDir: resolveUiDir(),
   });
   app.listen(port, () => {

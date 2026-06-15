@@ -1,11 +1,15 @@
 import { useEffect, useState } from "react";
 import {
   HEALTH_PATH,
+  NOTE_PATH,
   TREE_PATH,
   type HealthStatus,
+  type NoteContentResponse,
   type NoteNode,
   type NoteTreeResponse,
 } from "@stout/core";
+import { TipTapEditor } from "./TipTapEditor.js";
+import type { EditorComponent } from "./editor.js";
 
 type Fetched =
   | { state: "loading" }
@@ -73,14 +77,94 @@ export function useTree(fetchImpl: typeof fetch = fetch): TreeFetched {
   return result;
 }
 
-function NoteTreeItem({ node }: { node: NoteNode }) {
+type NoteFetched =
+  | { state: "idle" }
+  | { state: "loading" }
+  | { state: "error"; message: string }
+  | { state: "ready"; note: NoteContentResponse };
+
+/**
+ * Fetch a note's content by identity. `path` is the note's tree `path` (the root
+ * note is `""`); `null` means "nothing selected" and yields the idle state.
+ */
+export function useNote(
+  path: string | null,
+  fetchImpl: typeof fetch = fetch,
+): NoteFetched {
+  const [result, setResult] = useState<NoteFetched>(
+    path === null ? { state: "idle" } : { state: "loading" },
+  );
+
+  useEffect(() => {
+    if (path === null) {
+      setResult({ state: "idle" });
+      return;
+    }
+    let active = true;
+    setResult({ state: "loading" });
+    fetchImpl(`${NOTE_PATH}?path=${encodeURIComponent(path)}`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json() as Promise<NoteContentResponse>;
+      })
+      .then((note) => {
+        if (active) setResult({ state: "ready", note });
+      })
+      .catch((err: unknown) => {
+        if (active)
+          setResult({
+            state: "error",
+            message: err instanceof Error ? err.message : String(err),
+          });
+      });
+    return () => {
+      active = false;
+    };
+  }, [path, fetchImpl]);
+
+  return result;
+}
+
+function NoteTreeItem({
+  node,
+  selectedPath,
+  onSelect,
+}: {
+  node: NoteNode;
+  selectedPath: string | null;
+  onSelect: (path: string) => void;
+}) {
+  const isSelected = selectedPath === node.path;
   return (
     <li>
-      <span data-testid="note-title">{node.title}</span>
+      <button
+        type="button"
+        data-testid="note-title"
+        aria-current={isSelected ? "true" : undefined}
+        onClick={() => onSelect(node.path)}
+        style={{
+          appearance: "none",
+          background: isSelected ? "#2b2f31" : "transparent",
+          border: "none",
+          color: "inherit",
+          cursor: "pointer",
+          font: "inherit",
+          padding: "0.15rem 0.35rem",
+          textAlign: "left",
+          width: "100%",
+        }}
+      >
+        {node.title}
+      </button>
       {node.children.length > 0 && (
         <ul style={{ listStyle: "none", margin: 0, paddingLeft: "1rem" }}>
           {node.children.map((child) => (
-            <NoteTreeItem key={child.path} node={child} />
+            <NoteTreeItem
+              key={child.path}
+              node={child}
+              selectedPath={selectedPath}
+              onSelect={onSelect}
+            />
           ))}
         </ul>
       )}
@@ -88,7 +172,13 @@ function NoteTreeItem({ node }: { node: NoteNode }) {
   );
 }
 
-function NavPanel() {
+function NavPanel({
+  selectedPath,
+  onSelect,
+}: {
+  selectedPath: string | null;
+  onSelect: (path: string) => void;
+}) {
   const result = useTree();
 
   return (
@@ -111,15 +201,52 @@ function NavPanel() {
       )}
       {result.state === "ready" && (
         <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
-          <NoteTreeItem node={result.tree.root} />
+          <NoteTreeItem
+            node={result.tree.root}
+            selectedPath={selectedPath}
+            onSelect={onSelect}
+          />
         </ul>
       )}
     </nav>
   );
 }
 
-export function App() {
+function NotePanel({
+  selectedPath,
+  Editor,
+}: {
+  selectedPath: string | null;
+  Editor: EditorComponent;
+}) {
+  const result = useNote(selectedPath);
+
+  return (
+    <section aria-label="Note" style={{ marginBottom: "2rem" }}>
+      {result.state === "idle" && (
+        <p data-testid="note-empty">Select a note to open it.</p>
+      )}
+      {result.state === "loading" && <p>Loading note…</p>}
+      {result.state === "error" && (
+        <p role="alert">Could not load note: {result.message}</p>
+      )}
+      {result.state === "ready" && (
+        <article data-testid="note-content" data-note-path={result.note.path}>
+          <Editor markdown={result.note.markdown} />
+        </article>
+      )}
+    </section>
+  );
+}
+
+export interface AppProps {
+  /** Swappable editor seam; defaults to the TipTap implementation. */
+  Editor?: EditorComponent;
+}
+
+export function App({ Editor = TipTapEditor }: AppProps = {}) {
   const result = useHealth();
+  const [selected, setSelected] = useState<string | null>(null);
 
   return (
     <div
@@ -129,9 +256,10 @@ export function App() {
         fontFamily: "ui-monospace, monospace",
       }}
     >
-      <NavPanel />
+      <NavPanel selectedPath={selected} onSelect={setSelected} />
       <main style={{ flex: 1, padding: "2rem" }}>
         <h1>Stout</h1>
+        <NotePanel selectedPath={selected} Editor={Editor} />
         <section>
           <h2>Service health</h2>
           {result.state === "loading" && <p>Checking health…</p>}

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { readNoteTree } from "@stout/core";
+import { readNote, readNoteTree } from "@stout/core";
 import {
   ensureWorkspaceRepo,
   loadRepoPaths,
@@ -112,6 +112,49 @@ describe("NodeGitEngine + readNoteTree", () => {
         children: [],
       },
     ]);
+  });
+});
+
+describe("NodeGitEngine.readNoteFile + readNote", () => {
+  it("reads the starter root note's Markdown by identity", async () => {
+    await ensureWorkspaceRepo(paths);
+    const engine = new NodeGitEngine(paths.cloneDir);
+
+    const note = await readNote(engine, "");
+    expect(note).toMatchObject({ path: "", file: "_index.md" });
+    expect(note?.markdown).toContain("# Welcome to Stout");
+  });
+
+  it("reads a leaf and a parent note from the real repo", async () => {
+    await ensureWorkspaceRepo(paths);
+    await commitNote(paths.cloneDir, "projects/_index.md", "# Projects\n");
+    await commitNote(
+      paths.cloneDir,
+      "projects/ideas.md",
+      "# Ideas\n\n- [ ] Ship it\n",
+    );
+    const engine = new NodeGitEngine(paths.cloneDir);
+
+    expect(await readNote(engine, "projects")).toMatchObject({
+      path: "projects",
+      file: "projects/_index.md",
+      markdown: "# Projects\n",
+    });
+    expect((await readNote(engine, "projects/ideas"))?.markdown).toContain(
+      "- [ ] Ship it",
+    );
+  });
+
+  it("resolves to null for a missing note", async () => {
+    await ensureWorkspaceRepo(paths);
+    const engine = new NodeGitEngine(paths.cloneDir);
+    expect(await readNote(engine, "does/not/exist")).toBeNull();
+  });
+
+  it("refuses to read outside the working clone", async () => {
+    await ensureWorkspaceRepo(paths);
+    const engine = new NodeGitEngine(paths.cloneDir);
+    expect(await engine.readNoteFile("../../etc/passwd")).toBeNull();
   });
 });
 

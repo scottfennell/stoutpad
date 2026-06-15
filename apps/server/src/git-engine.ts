@@ -5,7 +5,8 @@
  * (1) initializes the on-disk storage on first boot — a **bare repo** (the
  * canonical store / future Git remote) plus a **working clone** seeded with a
  * starter `_index.md` — and (2) implements the pure {@link GitEngine} read seam
- * by listing the Markdown files tracked in the working clone.
+ * by listing the Markdown files tracked in the working clone and reading a single
+ * note file's content (with a guard against path escapes).
  *
  * We shell out to the system `git` rather than pulling in a Git library: local
  * bare/clone/commit/push are first-class in the CLI and add zero dependencies.
@@ -16,8 +17,8 @@
  */
 
 import { execFile } from "node:child_process";
-import { access, mkdir, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { INDEX_FILE, type GitEngine, type NoteFile } from "@stout/core";
 
@@ -87,6 +88,19 @@ export class NodeGitEngine implements GitEngine {
       .split("\0")
       .filter((path) => path.length > 0 && path.toLowerCase().endsWith(".md"))
       .map((path) => ({ path }));
+  }
+
+  async readNoteFile(path: string): Promise<string | null> {
+    // Resolve under the clone root and reject anything that escapes it, so a
+    // crafted `path` query can never read outside the working clone.
+    const root = resolve(this.cloneDir);
+    const full = resolve(root, path);
+    if (full !== root && !full.startsWith(root + sep)) return null;
+    try {
+      return await readFile(full, "utf8");
+    } catch {
+      return null;
+    }
   }
 }
 

@@ -40,6 +40,25 @@ The conventional file name that makes a directory a parent note and holds that
 parent note's own content. It is the parent's backing file, never a child note
 named "_index".
 
+### Canonical Markdown
+
+A note's content is plain **Markdown** — the text of its backing file — and that
+Markdown is the *canonical* representation. Everything richer (the editor's
+document model, rendered HTML) is derived from it and serialized back to Markdown
+on edit; Markdown is what git stores and what `GET /api/note`
+(`NOTE_PATH`/`NoteContentResponse`) returns, keyed by the note's `path` identity.
+The pure `core/markdown` parser turns it into a small block model (headings,
+paragraphs, bullet lists, and checkbox **task lists**) without touching the DOM.
+
+### Editor seam
+
+The swappable contract through which the center panel renders a note: **Markdown
+in, change events out**. Any component honoring it (`EditorComponent` in
+`@stout/ui`) can be dropped in; the default is a **TipTap** implementation that
+renders live formatting and checkboxes. The seam keeps the rich editor (TipTap /
+ProseMirror, DOM-bound) out of `@stout/core`, mirroring how the git engine keeps
+Node out of core.
+
 ### Working clone
 
 The checked-out git clone (`<STOUT_DATA_DIR>/clone`) that the server reads and
@@ -68,7 +87,9 @@ database reachability, and current migration version.
 ## Boundaries
 
 - **`@stout/core` is pure** — runtime-agnostic domain logic only, no Node/DOM/git
-  imports. The note-tree mapping is a pure function here; the git engine is an
-  interface here. The Node/git side lives in `apps/server`.
+  imports. The note-tree mapping and the `core/markdown` parser are pure functions
+  here; the git engine is an interface here. The Node/git side lives in
+  `apps/server`, and the rich editor (TipTap/ProseMirror, DOM-bound) lives behind
+  the Editor seam in `packages/ui`.
 - **Git is the single source of truth.** Postgres (vector index + derived
   metadata) is disposable and rebuildable from the repo; it is never canonical.

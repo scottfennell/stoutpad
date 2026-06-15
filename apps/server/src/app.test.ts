@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import request from "supertest";
 import {
   HEALTH_PATH,
+  NOTE_PATH,
   TREE_PATH,
   type HealthStatus,
+  type NoteContentResponse,
   type NoteTreeResponse,
 } from "@stout/core";
 import { createApp } from "./app.js";
@@ -97,6 +99,72 @@ describe("tree round-trip", () => {
     const app = createApp({ getHealth: async () => okHealth });
 
     const res = await request(app).get(TREE_PATH);
+
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("note round-trip", () => {
+  const sampleNote: NoteContentResponse = {
+    path: "notes",
+    file: "notes.md",
+    markdown: "# Notes\n\n- [x] Done\n- [ ] Todo\n",
+  };
+
+  it("returns a note's content by identity", async () => {
+    const app = createApp({
+      getHealth: async () => okHealth,
+      getNote: async (path) => (path === "notes" ? sampleNote : null),
+    });
+
+    const res = await request(app).get(NOTE_PATH).query({ path: "notes" });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(sampleNote);
+  });
+
+  it("treats a missing path query as the root note", async () => {
+    const app = createApp({
+      getHealth: async () => okHealth,
+      getNote: async (path) => ({ path, file: "_index.md", markdown: "# Home\n" }),
+    });
+
+    const res = await request(app).get(NOTE_PATH);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ path: "", file: "_index.md" });
+  });
+
+  it("returns 404 when the note is missing", async () => {
+    const app = createApp({
+      getHealth: async () => okHealth,
+      getNote: async () => null,
+    });
+
+    const res = await request(app).get(NOTE_PATH).query({ path: "ghost" });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toContain("ghost");
+  });
+
+  it("returns 500 when reading the note fails", async () => {
+    const app = createApp({
+      getHealth: async () => okHealth,
+      getNote: async () => {
+        throw new Error("repo unreadable");
+      },
+    });
+
+    const res = await request(app).get(NOTE_PATH).query({ path: "notes" });
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toContain("repo unreadable");
+  });
+
+  it("does not mount the note endpoint when no reader is injected", async () => {
+    const app = createApp({ getHealth: async () => okHealth });
+
+    const res = await request(app).get(NOTE_PATH).query({ path: "notes" });
 
     expect(res.status).toBe(404);
   });
