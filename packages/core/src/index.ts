@@ -7,8 +7,10 @@
  * (`GET /api/tree`, `GET`/`POST /api/note`, create/rename/move endpoints), the
  * pure `core/markdown` parser/serializer, the `core/sync` autosave +
  * wip-branch squash state machine (`POST /api/note/sync`), the
- * `core/wikilink` title resolver + link graph (`GET /api/links`), and the
- * `core/attachment` embedded-media contract (`POST /api/attachment`).
+ * `core/wikilink` title resolver + link graph (`GET /api/links`), the
+ * `core/attachment` embedded-media contract (`POST /api/attachment`), and the
+ * pure `core/search-index` core (chunking, the Embedder/VectorStore seams,
+ * cosine ranking + keyword fallback) behind `GET /api/search`.
  * Everything here is runtime-agnostic — the Node/Git and editor (DOM)
  * implementations live in `apps/server` and `packages/ui`.
  */
@@ -21,6 +23,7 @@ export * from "./markdown.js";
 export * from "./sync.js";
 export * from "./wikilink.js";
 export * from "./attachment.js";
+export * from "./search-index.js";
 
 /** Health status reported by the server's `/api/health` endpoint. */
 export interface HealthStatus {

@@ -13,12 +13,14 @@ import {
   NOTE_RENAME_PATH,
   NoteMutationError,
   SYNC_PATH,
+  SEARCH_PATH,
   TREE_PATH,
   type HealthStatus,
   type LinkGraphResponse,
   type NoteContentResponse,
   type NoteSyncRequest,
   type NoteTreeResponse,
+  type SearchRequest,
 } from "@stout/core";
 import { createApp } from "./app.js";
 
@@ -743,6 +745,70 @@ describe("attachment upload round-trip", () => {
     const res = await request(app)
       .post(ATTACHMENT_PATH)
       .send({ name: "diagram.png", dataBase64: "AQ==" });
+
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("search round-trip", () => {
+  it("ranks notes for a query and forwards the parsed params", async () => {
+    const calls: SearchRequest[] = [];
+    const app = createApp({
+      getHealth: async () => okHealth,
+      search: async (request) => {
+        calls.push(request);
+        return {
+          query: request.query,
+          mode: "semantic",
+          results: [{ path: "notes", title: "Notes", snippet: "hello world", score: 0.9 }],
+        };
+      },
+    });
+
+    const res = await request(app)
+      .get(SEARCH_PATH)
+      .query({ q: "hello", limit: "5", mode: "semantic" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.mode).toBe("semantic");
+    expect(res.body.results[0].path).toBe("notes");
+    expect(calls).toEqual([{ query: "hello", limit: 5, mode: "semantic" }]);
+  });
+
+  it("defaults a missing query to empty and drops an unknown mode/limit", async () => {
+    const calls: SearchRequest[] = [];
+    const app = createApp({
+      getHealth: async () => okHealth,
+      search: async (request) => {
+        calls.push(request);
+        return { query: request.query, mode: "keyword", results: [] };
+      },
+    });
+
+    const res = await request(app).get(SEARCH_PATH).query({ mode: "fuzzy", limit: "abc" });
+
+    expect(res.status).toBe(200);
+    expect(calls).toEqual([{ query: "", limit: undefined, mode: undefined }]);
+  });
+
+  it("returns 500 when the search fails", async () => {
+    const app = createApp({
+      getHealth: async () => okHealth,
+      search: async () => {
+        throw new Error("index down");
+      },
+    });
+
+    const res = await request(app).get(SEARCH_PATH).query({ q: "x" });
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toContain("index down");
+  });
+
+  it("does not mount the search endpoint when no searcher is injected", async () => {
+    const app = createApp({ getHealth: async () => okHealth });
+
+    const res = await request(app).get(SEARCH_PATH).query({ q: "x" });
 
     expect(res.status).toBe(404);
   });

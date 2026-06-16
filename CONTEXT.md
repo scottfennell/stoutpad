@@ -200,6 +200,26 @@ composition. It is the queryable, whole-repo view of linking (the basis for a
 future backlinks panel / graph navigation); the editor does not need it, resolving
 links locally off the tree instead.
 
+### Search index
+
+A derived, queryable projection of the notes that powers **search**: every note's
+**canonical Markdown** is split into bounded **chunks** (title-aware) and each
+chunk is turned into an **embedding** (a vector) by a **locally-run** model on the
+server, stored in pgvector. A search **embeds the query** and ranks chunks by
+vector (cosine) similarity — **semantic search** — de-duplicated to the best
+chunk per note. When semantic ranking is unavailable or empty (no model, the
+index is down, or the caller asks for it), search falls back to **keyword search**
+— a pure term scorer over note titles, file paths, and bodies — and the
+`SearchResponse` reports which **mode** actually ran, so degradation is visible.
+Exposed read-only at `GET /api/search` (`SEARCH_PATH` / `SearchRequest` →
+`SearchResponse`), surfaced in a search box that opens a chosen result. Like the
+**link graph**, it is a pure-core pipeline (`core/search-index`: chunking,
+ranking, and the `Embedder` / `VectorStore` seams) over an injected store +
+embedder; unlike it, the vectors are persisted in Postgres. The index is a
+**derived projection of git** — never canonical — so it **updates on commit** (a
+saved/squashed/created note is re-indexed; a rename/move and every boot rebuild
+it) and is **fully rebuildable from the repo** at any time.
+
 ### Working clone
 
 The checked-out git clone (`<STOUT_DATA_DIR>/clone`) that the server reads and

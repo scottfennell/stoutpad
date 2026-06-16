@@ -11,6 +11,7 @@ import {
   NOTE_RENAME_PATH,
   NoteMutationError,
   SYNC_PATH,
+  SEARCH_PATH,
   TREE_PATH,
   type AttachmentResponse,
   type AttachmentUploadRequest,
@@ -25,6 +26,8 @@ import {
   type NoteSyncRequest,
   type NoteSyncResponse,
   type NoteTreeResponse,
+  type SearchRequest,
+  type SearchResponse,
   type SyncAction,
 } from "@stout/core";
 
@@ -83,6 +86,12 @@ export interface AppDeps {
    * is tested without a real repo. Omit to skip mounting the attachment endpoint.
    */
   saveAttachment?: (name: string, dataBase64: string) => Promise<AttachmentResponse>;
+  /**
+   * Answer a search query — semantic ranking with an automatic keyword fallback.
+   * Injected so HTTP behavior is tested without a model or vector store. Omit to
+   * skip mounting the search endpoint.
+   */
+  search?: (request: SearchRequest) => Promise<SearchResponse>;
   /**
    * Absolute path to the repo's `assets/` folder, served read-only at `/assets`
    * so embedded images resolve. Omit to skip hosting attachments.
@@ -329,6 +338,30 @@ export function createApp(deps: AppDeps): Express {
     // Serve stored attachments read-only. Mounted before the SPA fallback so an
     // `<img src="/assets/…">` resolves to the file rather than index.html.
     app.use("/assets", express.static(deps.assetsDir));
+  }
+
+  if (deps.search) {
+    const search = deps.search;
+    // `GET /api/search?q=&limit=&mode=` ranks notes by relevance: semantic search
+    // with an automatic keyword fallback. Read-only; an empty query yields an
+    // empty result set (handled by the search core).
+    app.get(SEARCH_PATH, async (req, res) => {
+      const query = typeof req.query.q === "string" ? req.query.q : "";
+      const mode =
+        req.query.mode === "keyword" || req.query.mode === "semantic"
+          ? req.query.mode
+          : undefined;
+      const parsedLimit =
+        typeof req.query.limit === "string" ? Number(req.query.limit) : NaN;
+      const limit = Number.isFinite(parsedLimit) ? parsedLimit : undefined;
+      try {
+        res.json(await search({ query, limit, mode }));
+      } catch (err) {
+        res.status(500).json({
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
   }
 
   if (deps.uiDir) {

@@ -3,6 +3,7 @@ import {
   readLinkGraph,
   readNote,
   readNoteTree,
+  readSearchableNotes,
   writeNote,
   type NoteFile,
   type NoteNode,
@@ -163,5 +164,23 @@ describe("readLinkGraph", () => {
       { from: "projects/ideas", to: "" },
     ]);
     expect(graph.broken).toEqual([{ from: "projects", target: "Ghost" }]);
+  });
+});
+
+describe("readSearchableNotes", () => {
+  it("reads every note's identity, title, and markdown in tree order", async () => {
+    const engine = new InMemoryGitEngine({
+      "_index.md": "# Home\n\nWelcome.\n",
+      "projects/_index.md": "# Projects\n\nWork.\n",
+      "projects/ideas.md": "# Ideas\n\nThoughts.\n",
+    });
+
+    const notes = await readSearchableNotes(engine);
+
+    expect(notes).toEqual([
+      { path: "", title: "Home", markdown: "# Home\n\nWelcome.\n" },
+      { path: "projects", title: "Projects", markdown: "# Projects\n\nWork.\n" },
+      { path: "projects/ideas", title: "Ideas", markdown: "# Ideas\n\nThoughts.\n" },
+    ]);
   });
 });

@@ -15,12 +15,14 @@ import {
   NOTE_MOVE_PATH,
   NOTE_PATH,
   NOTE_RENAME_PATH,
+  SEARCH_PATH,
   SYNC_PATH,
   TREE_PATH,
   type HealthStatus,
   type NoteContentResponse,
   type NoteSyncResponse,
   type NoteTreeResponse,
+  type SearchResponse,
 } from "@stout/core";
 
 afterEach(() => {
@@ -618,5 +620,94 @@ describe("App frontmatter & attachments", () => {
     });
 
     expect(await screen.findByText("disk full")).toBeTruthy();
+  });
+});
+
+/** Fetch calls (any method) whose URL targets the search endpoint, in order. */
+function searchCalls(): string[] {
+  return vi
+    .mocked(fetch)
+    .mock.calls.map(([input]) =>
+      typeof input === "string" ? input : (input as URL).toString(),
+    )
+    .filter((url) => url.startsWith(SEARCH_PATH));
+}
+
+describe("App search", () => {
+  const searchResponse: SearchResponse = {
+    query: "notes",
+    mode: "semantic",
+    results: [
+      { path: "notes", title: "Notes", snippet: "my notes about things", score: 0.91 },
+    ],
+  };
+
+  it("only queries the index after non-empty input", async () => {
+    stubApi({
+      [HEALTH_PATH]: health,
+      [TREE_PATH]: tree,
+      [`${SEARCH_PATH}?q=notes`]: searchResponse,
+    });
+
+    render(<App Editor={FakeEditor} debounceMs={0} />);
+
+    // The box renders, but an empty query never touches the search endpoint.
+    const input = await screen.findByTestId("search-input");
+    expect(searchCalls()).toEqual([]);
+
+    fireEvent.change(input, { target: { value: "notes" } });
+
+    // Once there is a query, the (debounced) search fires exactly one request,
+    // carrying the typed query in the `q` param.
+    await waitFor(() => expect(searchCalls()).toEqual([`${SEARCH_PATH}?q=notes`]));
+    // The ranking mode the server actually used is surfaced to the user.
+    expect(screen.getByTestId("search-mode").textContent).toBe("semantic");
+  });
+
+  it("clears back to no request when the query is emptied", async () => {
+    stubApi({
+      [HEALTH_PATH]: health,
+      [TREE_PATH]: tree,
+      [`${SEARCH_PATH}?q=notes`]: searchResponse,
+    });
+
+    render(<App Editor={FakeEditor} debounceMs={0} />);
+
+    const input = await screen.findByTestId("search-input");
+    fireEvent.change(input, { target: { value: "notes" } });
+    await waitFor(() => expect(searchCalls().length).toBe(1));
+
+    // Emptying the box returns to idle without firing another search request.
+    fireEvent.change(input, { target: { value: "" } });
+    await waitFor(() => expect(screen.queryByTestId("search-results")).toBeNull());
+    expect(searchCalls().length).toBe(1);
+  });
+
+  it("opens a clicked result in the center panel", async () => {
+    const note: NoteContentResponse = {
+      path: "notes",
+      file: "notes.md",
+      markdown: "# Notes\n",
+    };
+    stubApi({
+      [HEALTH_PATH]: health,
+      [TREE_PATH]: tree,
+      [`${SEARCH_PATH}?q=notes`]: searchResponse,
+      [`${NOTE_PATH}?path=notes`]: note,
+    });
+
+    render(<App Editor={FakeEditor} debounceMs={0} />);
+
+    fireEvent.change(await screen.findByTestId("search-input"), {
+      target: { value: "notes" },
+    });
+
+    // Clicking a ranked hit selects that note, loading it into the center panel.
+    fireEvent.click(await screen.findByTestId("search-result"));
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("note-content").getAttribute("data-note-path"),
+      ).toBe("notes"),
+    );
   });
 });

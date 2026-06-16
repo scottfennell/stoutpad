@@ -15,10 +15,13 @@ import {
   type NoteContentResponse,
   type NoteNode,
   type NoteTreeResponse,
+  type SearchResponse,
+  type SearchResult,
 } from "@stout/core";
 import { TipTapEditor } from "./TipTapEditor.js";
 import { createHttpWipEngine } from "./sync-client.js";
 import { postAttachment } from "./attachment-client.js";
+import { getSearch } from "./search-client.js";
 import { postNoteCreate, postNoteMove, postNoteRename } from "./mutation-client.js";
 import type { EditorComponent, WikiLinkContext } from "./editor.js";
 
@@ -139,6 +142,63 @@ export function useNote(
       active = false;
     };
   }, [path, fetchImpl]);
+
+  return result;
+}
+
+/**
+ * Search debounce (ms): how long the box must be idle before a query is sent.
+ * Shorter than the autosave debounce — search should feel responsive — but long
+ * enough to coalesce a burst of keystrokes into a single request.
+ */
+const SEARCH_DEBOUNCE_MS = 150;
+
+type SearchFetched =
+  | { state: "idle" }
+  | { state: "loading" }
+  | { state: "error"; message: string }
+  | { state: "ready"; response: SearchResponse };
+
+/**
+ * Debounced note search. An empty/whitespace query is inert — it never hits the
+ * network and resolves to the idle state — so the index is only queried once the
+ * user has actually typed something and paused. Each keystroke restarts the
+ * debounce; a superseded or unmounted query is ignored. Ranking (semantic with
+ * an automatic keyword fallback) lives server-side; this only sends the query.
+ */
+export function useSearch(
+  query: string,
+  options: { debounceMs?: number; fetchImpl?: typeof fetch } = {},
+): SearchFetched {
+  const { debounceMs = SEARCH_DEBOUNCE_MS, fetchImpl } = options;
+  const [result, setResult] = useState<SearchFetched>({ state: "idle" });
+
+  useEffect(() => {
+    const trimmed = query.trim();
+    if (trimmed === "") {
+      setResult({ state: "idle" });
+      return;
+    }
+    let active = true;
+    const timer = setTimeout(() => {
+      setResult({ state: "loading" });
+      getSearch({ query: trimmed }, fetchImpl ?? fetch)
+        .then((response) => {
+          if (active) setResult({ state: "ready", response });
+        })
+        .catch((err: unknown) => {
+          if (active)
+            setResult({
+              state: "error",
+              message: err instanceof Error ? err.message : String(err),
+            });
+        });
+    }, debounceMs);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [query, debounceMs, fetchImpl]);
 
   return result;
 }
@@ -399,6 +459,116 @@ function NavPanel({
   );
 }
 
+/** One ranked search hit: the note's title over a snippet; click to open it. */
+function SearchResultItem({
+  result,
+  onSelect,
+}: {
+  result: SearchResult;
+  onSelect: (path: string) => void;
+}) {
+  return (
+    <li>
+      <button
+        type="button"
+        data-testid="search-result"
+        data-result-path={result.path}
+        onClick={() => onSelect(result.path)}
+        style={{
+          appearance: "none",
+          background: "transparent",
+          border: "none",
+          color: "inherit",
+          cursor: "pointer",
+          font: "inherit",
+          display: "block",
+          width: "100%",
+          textAlign: "left",
+          padding: "0.35rem 0.5rem",
+          borderRadius: "0.25rem",
+        }}
+      >
+        <span style={{ display: "block", color: "#f2be8c" }}>
+          {result.title || "Home"}
+        </span>
+        <span style={{ display: "block", fontSize: "0.8em", color: "#9aa0a3" }}>
+          {result.snippet}
+        </span>
+      </button>
+    </li>
+  );
+}
+
+/**
+ * The search box and its ranked results. Typing queries the index (debounced);
+ * clicking a result opens that note in the center panel. The result list reports
+ * which ranking actually ran (semantic, or the keyword fallback) so a degraded
+ * model is visible rather than silent.
+ */
+function SearchPanel({
+  onSelect,
+  debounceMs,
+}: {
+  onSelect: (path: string) => void;
+  debounceMs?: number;
+}) {
+  const [query, setQuery] = useState("");
+  const result = useSearch(query, { debounceMs });
+
+  return (
+    <section aria-label="Search" style={{ marginBottom: "1.5rem" }}>
+      <input
+        type="search"
+        aria-label="Search notes"
+        placeholder="Search notes…"
+        data-testid="search-input"
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+        style={{
+          width: "100%",
+          boxSizing: "border-box",
+          padding: "0.4rem 0.6rem",
+          background: "#191c1d",
+          border: "1px solid #50453b",
+          borderRadius: "0.25rem",
+          color: "#e1e3e4",
+          font: "inherit",
+        }}
+      />
+      {result.state === "loading" && <p data-testid="search-status">Searching…</p>}
+      {result.state === "error" && (
+        <p role="alert">Search failed: {result.message}</p>
+      )}
+      {result.state === "ready" && (
+        <div data-testid="search-results">
+          {result.response.results.length === 0 ? (
+            <p data-testid="search-empty">No matches.</p>
+          ) : (
+            <>
+              <p
+                style={{
+                  fontSize: "0.7rem",
+                  color: "#9aa0a3",
+                  margin: "0.5rem 0 0.25rem",
+                }}
+              >
+                {result.response.results.length} result
+                {result.response.results.length === 1 ? "" : "s"} ·{" "}
+                <span data-testid="search-mode">{result.response.mode}</span>
+              </p>
+              <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+                {result.response.results.map((hit) => (
+                  <SearchResultItem key={hit.path} result={hit} onSelect={onSelect} />
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function NotePanel({
   selectedPath,
   Editor,
@@ -652,8 +822,9 @@ export interface AppProps {
   Editor?: EditorComponent;
   /**
    * Idle debounce (ms) before a buffered edit is autosaved to the note's wip
-   * branch. Defaults to {@link DEFAULT_DEBOUNCE_MS}; tests pass a small value for
-   * determinism.
+   * branch, and before a typed search query is sent. Defaults to
+   * {@link DEFAULT_DEBOUNCE_MS} for autosave / {@link SEARCH_DEBOUNCE_MS} for
+   * search; tests pass a small value for determinism.
    */
   debounceMs?: number;
 }
@@ -697,6 +868,7 @@ export function App({ Editor = TipTapEditor, debounceMs }: AppProps = {}) {
       />
       <main style={{ flex: 1, padding: "2rem" }}>
         <h1>Stout</h1>
+        <SearchPanel onSelect={setSelected} debounceMs={debounceMs} />
         <NotePanel
           selectedPath={selected}
           Editor={Editor}

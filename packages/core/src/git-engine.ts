@@ -147,18 +147,18 @@ export async function writeNote(
 }
 
 /**
- * Read every note's Markdown via the injected {@link GitEngine} and build the
- * unified {@link LinkGraphResponse link graph} of `[[wikilinks]]` between notes.
+ * Read every note's Markdown via the injected {@link GitEngine}, in deterministic
+ * tree order, together with the {@link NoteTreeResponse tree} they came from.
  *
- * The Node/Git reads (listing files, reading each backing file) stay in the
- * engine; the tree mapping, title indexing, and link resolution stay pure
- * (`core/note-tree`, `core/wikilink`). Notes are visited in tree order, so the
- * resulting graph is deterministic. The server exposes this at `GET /api/links`.
+ * The shared read behind both the link graph and the search corpus: the Node/Git
+ * reads (listing files, reading each backing file) stay in the engine; the tree
+ * mapping stays pure. A note whose backing file fails to read is skipped.
  */
-export async function readLinkGraph(engine: GitEngine): Promise<LinkGraphResponse> {
+async function readNotesWithContent(
+  engine: GitEngine,
+): Promise<{ root: NoteNode; notes: NoteContent[] }> {
   const files = await engine.listNoteFiles();
   const root = buildNoteTree(files);
-  const index = buildTitleIndex(root);
 
   const notes: NoteContent[] = [];
   const visit = async (node: NoteNode): Promise<void> => {
@@ -172,5 +172,34 @@ export async function readLinkGraph(engine: GitEngine): Promise<LinkGraphRespons
   };
   await visit(root);
 
+  return { root, notes };
+}
+
+/**
+ * Read every note's Markdown via the injected {@link GitEngine} and build the
+ * unified {@link LinkGraphResponse link graph} of `[[wikilinks]]` between notes.
+ *
+ * The Node/Git reads (listing files, reading each backing file) stay in the
+ * engine; the tree mapping, title indexing, and link resolution stay pure
+ * (`core/note-tree`, `core/wikilink`). Notes are visited in tree order, so the
+ * resulting graph is deterministic. The server exposes this at `GET /api/links`.
+ */
+export async function readLinkGraph(engine: GitEngine): Promise<LinkGraphResponse> {
+  const { root, notes } = await readNotesWithContent(engine);
+  const index = buildTitleIndex(root);
   return buildLinkGraph(notes, index);
+}
+
+/**
+ * Read the full note corpus (each note's identity, title, and Markdown) via the
+ * injected {@link GitEngine}, in deterministic tree order.
+ *
+ * This is the input the search index is (re)built from: the server feeds it to
+ * the `core/search-index` `rebuildIndex`/`keywordSearch` paths. The reads stay in
+ * the engine; the corpus assembly stays pure. Titles are file/folder-derived
+ * (the search chunker re-reads any frontmatter `title:` override per note).
+ */
+export async function readSearchableNotes(engine: GitEngine): Promise<NoteContent[]> {
+  const { notes } = await readNotesWithContent(engine);
+  return notes;
 }
