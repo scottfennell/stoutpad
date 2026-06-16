@@ -20,6 +20,9 @@ importers:
       '@stout/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@stout/server':
+        specifier: workspace:*
+        version: link:../server
     devDependencies:
       '@types/node':
         specifier: ^22.10.5

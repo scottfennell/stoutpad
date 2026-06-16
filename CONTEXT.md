@@ -262,6 +262,51 @@ the single source of truth and the (future) git remote clients sync against. On
 first boot the server initializes the bare repo, clones a working clone from it,
 seeds a starter `_index.md`, and pushes that seed back to the bare repo.
 
+### Hub
+
+The remote Git repository the **local-first desktop** clones its **working clone**
+from and syncs against — the desktop's counterpart to the web server's **bare
+repo**, reachable over HTTPS. It is the shared source of truth several desktop
+clients (or a client and the web app) rendezvous on. Reaching it requires a **hub
+token**. Configuring a hub is optional: with none set, the desktop runs fully local
+(its clone is seeded locally and never synced).
+
+### Hub sync
+
+The desktop's clone-then-sync lifecycle against its **hub**: on first run (no local
+clone yet) **clone** the hub; on every subsequent run **pull then push** (integrate
+remote work before publishing local). The *policy* — including the credential maths
+that injects the **hub token** into the remote URL for a single git op, strips it so
+it is never persisted to `.git/config`, and redacts it for logging — is the pure
+`core/hub-sync` (`syncWithHub` over the narrow `HubRemoteEngine` seam); the
+*mechanism* (shelling `git clone`/`pull`/`push`) is `NodeHubRemoteEngine` in
+`apps/server`, the hub-remote counterpart to the **git engine**'s `NodeGitEngine`.
+If the hub is unreachable on first run, the desktop falls back to a local-only
+workspace so it still opens.
+
+### Hub token
+
+The access credential the desktop authenticates to its **hub** with — a secret. It
+is encrypted at rest by the OS keychain (Electron `safeStorage`), **never** logged
+and **never** written in plaintext; it is materialised into a remote URL only at the
+moment a git op runs, never stored in `.git/config`. The secret-at-rest contract is
+the pure `core/token-store` (`TokenStore` over the `SecureStorage` + `SecureFilePorts`
+seams; `createSecureFileTokenStore` encrypts before touching disk and refuses to
+persist when encryption is unavailable — there is no plaintext fallback). The
+Electron adapter (`safe-storage.ts`) backs it with `safeStorage` + a file under the
+app's user-data directory.
+
+### Local-first desktop
+
+The Electron app: it runs the **same** built `@stout/ui` SPA and the **same**
+`/api/*` surface as the web server (via `@stout/server/desktop`'s
+`startLocalWorkspace`), only backed by a local **working clone** on disk and an
+**in-memory search index** (the pure hashing embedder + in-memory vector store)
+instead of Postgres — so there is **no UI fork** and the window talks only to a
+loopback host. It needs no server and, with no **hub** configured, no network.
+Having no database is its *healthy* state, not a degraded one. Optionally it syncs
+its clone to a **hub** (see **hub sync**) before opening the window.
+
 ### Git engine
 
 The deep module (`core/git-engine`) that reads and writes the working clone. The
@@ -279,7 +324,9 @@ one atomic commit). The Node implementation that touches the filesystem and the
 
 Walking-skeleton liveness contract returned by `GET /api/health`: service status,
 database reachability, and current migration version. Surfaced in the **contextual
-utilities panel**'s System section.
+utilities panel**'s System section. On the **local-first desktop** the database is
+absent by design, so health reports `ok` with `database: false` — an expected,
+healthy state, not a fault.
 
 ## Boundaries
 
@@ -290,3 +337,8 @@ utilities panel**'s System section.
   the Editor seam in `packages/ui`.
 - **Git is the single source of truth.** Postgres (vector index + derived
   metadata) is disposable and rebuildable from the repo; it is never canonical.
+- **One UI, two runtimes.** The web server and the **local-first desktop** serve
+  the *same* `@stout/ui` build over the *same* `/api/*` surface; only the backing
+  differs (Postgres + bare repo vs. a local clone + in-memory index). There is no
+  per-runtime UI fork, and the **hub token** never leaves the OS keychain in
+  plaintext.
