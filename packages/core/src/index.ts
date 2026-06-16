@@ -7,6 +7,8 @@
  * (`GET /api/tree`, `GET`/`POST /api/note`, create/rename/move endpoints), the
  * pure `core/markdown` parser/serializer, the `core/sync` autosave +
  * wip-branch squash state machine (`POST /api/note/sync`), the
+ * `core/sync-cadence` sync scheduler (launch/reconnect/focus/timer/manual) and
+ * the `core/conflict` multi-device merge policy (auto-merge + keep-both copy), the
  * `core/wikilink` title resolver + link graph (`GET /api/links`), the
  * `core/attachment` embedded-media contract (`POST /api/attachment`), the
  * pure `core/search-index` core (chunking, the Embedder/VectorStore seams,
@@ -24,6 +26,8 @@ export * from "./note-mutation.js";
 export * from "./git-engine.js";
 export * from "./markdown.js";
 export * from "./sync.js";
+export * from "./sync-cadence.js";
+export * from "./conflict.js";
 export * from "./wikilink.js";
 export * from "./attachment.js";
 export * from "./search-index.js";

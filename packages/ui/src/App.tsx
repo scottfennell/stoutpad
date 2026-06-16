@@ -12,6 +12,7 @@ import {
   resolveTitle,
   serializeMarkdown,
   TREE_PATH,
+  type ConflictNotification,
   type Frontmatter,
   type HealthStatus,
   type LinkGraph,
@@ -24,6 +25,7 @@ import {
 } from "@stout/core";
 import { TipTapEditor } from "./TipTapEditor.js";
 import { createHttpWipEngine } from "./sync-client.js";
+import { ConflictToasts, useConflictNotifications } from "./conflict-toast.js";
 import { postAttachment } from "./attachment-client.js";
 import { getSearch } from "./search-client.js";
 import { postNoteCreate, postNoteMove, postNoteRename } from "./mutation-client.js";
@@ -424,12 +426,14 @@ function NavPanel({
   onSelect,
   onReload,
   debounceMs,
+  fetchImpl,
 }: {
   treeResult: TreeFetched;
   selectedPath: string | null;
   onSelect: (path: string) => void;
   onReload: () => void;
   debounceMs?: number;
+  fetchImpl?: typeof fetch;
 }) {
   const [error, setError] = useState<string | null>(null);
 
@@ -439,18 +443,18 @@ function NavPanel({
         if (kind === "create") {
           const name = window.prompt(`New note under "${node.title || "Home"}"`);
           if (name === null || name.trim() === "") return;
-          return select(await postNoteCreate(node.path, name));
+          return select(await postNoteCreate(node.path, name, fetchImpl));
         }
         if (kind === "rename") {
           const name = window.prompt(`Rename "${node.title}" to`, node.title);
           if (name === null || name.trim() === "") return;
-          return select(await postNoteRename(node.path, name));
+          return select(await postNoteRename(node.path, name, fetchImpl));
         }
         const parent = window.prompt(
           `Move "${node.title}" under which note? (blank = Home)`,
         );
         if (parent === null) return;
-        return select(await postNoteMove(node.path, parent.trim()));
+        return select(await postNoteMove(node.path, parent.trim(), fetchImpl));
       };
       // Reselect the affected note and refetch the (reshaped) tree on success;
       // surface a rejected mutation (duplicate/invalid name, illegal move) inline.
@@ -463,7 +467,7 @@ function NavPanel({
         setError(err instanceof Error ? err.message : String(err));
       });
     },
-    [onSelect, onReload],
+    [onSelect, onReload, fetchImpl],
   );
 
   const root = treeResult.state === "ready" ? treeResult.tree.root : null;
@@ -490,7 +494,7 @@ function NavPanel({
       </div>
       <div className="panel__scroll">
         <div className="nav__body">
-          <SearchPanel onSelect={onSelect} debounceMs={debounceMs} />
+          <SearchPanel onSelect={onSelect} debounceMs={debounceMs} fetchImpl={fetchImpl} />
           <nav aria-label="Notes">
             <h2 className="nav-heading">Files</h2>
             {error !== null && (
@@ -554,12 +558,14 @@ function SearchResultItem({
 function SearchPanel({
   onSelect,
   debounceMs,
+  fetchImpl,
 }: {
   onSelect: (path: string) => void;
   debounceMs?: number;
+  fetchImpl?: typeof fetch;
 }) {
   const [query, setQuery] = useState("");
-  const result = useSearch(query, { debounceMs });
+  const result = useSearch(query, { debounceMs, fetchImpl });
 
   return (
     <section aria-label="Search" className="search">
@@ -618,11 +624,13 @@ function NotePanel({
   Editor,
   debounceMs,
   wikiLinks,
+  fetchImpl,
 }: {
   result: NoteFetched;
   Editor: EditorComponent;
   debounceMs?: number;
   wikiLinks?: WikiLinkContext;
+  fetchImpl?: typeof fetch;
 }) {
   return (
     <section aria-label="Note" className="note-section">
@@ -646,6 +654,7 @@ function NotePanel({
           Editor={Editor}
           debounceMs={debounceMs}
           wikiLinks={wikiLinks}
+          fetchImpl={fetchImpl}
         />
       )}
     </section>
@@ -794,11 +803,13 @@ function LoadedNote({
   Editor,
   debounceMs,
   wikiLinks,
+  fetchImpl,
 }: {
   note: NoteContentResponse;
   Editor: EditorComponent;
   debounceMs?: number;
   wikiLinks?: WikiLinkContext;
+  fetchImpl?: typeof fetch;
 }) {
   const { frontmatter, body: initialBody } = useMemo(
     () => splitFrontmatter(note.markdown),
@@ -810,7 +821,7 @@ function LoadedNote({
   const [uploadError, setUploadError] = useState<string | null>(null);
 
   // Drive the autosave/squash session off the loaded note's full Markdown.
-  const onSync = useNoteSync(note.path, note.markdown, { debounceMs });
+  const onSync = useNoteSync(note.path, note.markdown, { debounceMs, fetchImpl });
   const emitChange = useCallback(
     (nextBody: string) => onSync(recomposeNote(frontmatter, nextBody)),
     [onSync, frontmatter],
@@ -829,7 +840,7 @@ function LoadedNote({
       void (async () => {
         try {
           const dataBase64 = await fileToBase64(file);
-          const { path } = await postAttachment(file.name, dataBase64);
+          const { path } = await postAttachment(file.name, dataBase64, fetchImpl);
           // Read the latest body off the ref: the upload is async, so the user
           // may have edited since it started.
           const next = appendImage(bodyRef.current, path, file.name);
@@ -841,7 +852,7 @@ function LoadedNote({
         }
       })();
     },
-    [emitChange],
+    [emitChange, fetchImpl],
   );
 
   return (
@@ -1212,19 +1223,43 @@ export interface AppProps {
    * search; tests pass a small value for determinism.
    */
   debounceMs?: number;
+  /**
+   * Sink for conflict notifications. Called once on mount with a `notify` handle
+   * the caller drives when a sync produces a conflict copy (see
+   * {@link applyConflictResolution}); each call surfaces a non-blocking toast.
+   * The server-backed web app leaves this unset (the server reconciles before
+   * the client sees a conflict); the PWA offline runtime wires its sync
+   * controller's conflict notifications into it. See ADR 0011.
+   */
+  onConflicts?: (notify: (notification: ConflictNotification) => void) => void;
+  /**
+   * The data source the whole UI reads and writes through: a `fetch`-shaped
+   * seam. The server-backed web app and the Electron desktop leave this unset,
+   * so it defaults to the global `fetch` and every hook/client talks to the live
+   * `/api/*` HTTP surface unchanged. The **PWA offline runtime** injects an
+   * in-browser adapter (`createBrowserApiFetch`) that routes the same `/api/*`
+   * requests to the IndexedDB `BrowserGitEngine` — so there is one App, two
+   * backends, and no UI fork. See ADR 0011.
+   */
+  fetchImpl?: typeof fetch;
 }
 
-export function App({ Editor = TipTapEditor, debounceMs }: AppProps = {}) {
-  const health = useHealth();
+export function App({
+  Editor = TipTapEditor,
+  debounceMs,
+  onConflicts,
+  fetchImpl = fetch,
+}: AppProps = {}) {
+  const health = useHealth(fetchImpl);
   const [selected, setSelected] = useState<string | null>(null);
   const [mobilePane, setMobilePane] = useState<MobilePane>("editor");
   // The note tree is fetched once here and shared by the nav (rendering), the
   // editor (wikilink resolution), and the utilities panel (details + link titles).
   // Bumping the token refetches the tree and link graph after a mutation.
   const [reloadToken, setReloadToken] = useState(0);
-  const treeResult = useTree(fetch, reloadToken);
-  const noteResult = useNote(selected);
-  const linkGraph = useLinks(fetch, reloadToken);
+  const treeResult = useTree(fetchImpl, reloadToken);
+  const noteResult = useNote(selected, fetchImpl);
+  const linkGraph = useLinks(fetchImpl, reloadToken);
   const reloadTree = useCallback(() => setReloadToken((token) => token + 1), []);
 
   // Selecting a note also focuses the editor pane, so opening a note on mobile
@@ -1233,6 +1268,16 @@ export function App({ Editor = TipTapEditor, debounceMs }: AppProps = {}) {
     setSelected(path);
     setMobilePane("editor");
   }, []);
+
+  // Non-blocking conflict notifications. The toast list lives here so a conflict
+  // copy created by a background sync surfaces over the whole workspace without
+  // interrupting the editor. `notify` is handed to the (optional) conflict source
+  // once; "Open copy" navigates to the saved sibling via the same `selectNote`.
+  const conflicts = useConflictNotifications();
+  const notifyConflict = conflicts.notify;
+  useEffect(() => {
+    onConflicts?.(notifyConflict);
+  }, [onConflicts, notifyConflict]);
 
   // Resolve `[[wikilinks]]` against the loaded tree, entirely client-side: build a
   // title index once per tree and hand the editor a resolver, the autocomplete
@@ -1257,6 +1302,7 @@ export function App({ Editor = TipTapEditor, debounceMs }: AppProps = {}) {
           onSelect={selectNote}
           onReload={reloadTree}
           debounceMs={debounceMs}
+          fetchImpl={fetchImpl}
         />
         <main
           className="panel panel--editor"
@@ -1269,6 +1315,7 @@ export function App({ Editor = TipTapEditor, debounceMs }: AppProps = {}) {
               Editor={Editor}
               debounceMs={debounceMs}
               wikiLinks={wikiLinks}
+              fetchImpl={fetchImpl}
             />
           </div>
         </main>
@@ -1282,6 +1329,11 @@ export function App({ Editor = TipTapEditor, debounceMs }: AppProps = {}) {
         />
       </div>
       <MobileTabs pane={mobilePane} onPane={setMobilePane} />
+      <ConflictToasts
+        toasts={conflicts.toasts}
+        onOpenCopy={selectNote}
+        onDismiss={conflicts.dismiss}
+      />
     </div>
   );
 }

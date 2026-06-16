@@ -307,7 +307,101 @@ loopback host. It needs no server and, with no **hub** configured, no network.
 Having no database is its *healthy* state, not a degraded one. Optionally it syncs
 its clone to a **hub** (see **hub sync**) before opening the window.
 
-### Git engine
+### Offline PWA
+
+The browser as a **third runtime** for the same `@stout/ui` SPA: an installable,
+offline-capable Progressive Web App that owns its **own** local git clone in the
+browser. A web app **manifest** plus a **service worker** (Workbox `generateSW`
+via `vite-plugin-pwa`, registered once from `main.tsx`) precache the SPA shell and
+assets so the app installs and boots with no network; the service worker's
+navigation fallback serves the cached shell for app routes but **denylists**
+`/api` and `/assets` so live server routes are never shadowed. Its offline note
+backend is the **browser git engine** over IndexedDB — the same git-engine seam
+the server uses, a filesystem swap, not a forked code path. The running app is
+**not** forked to reach it: the whole UI reads and writes through one injectable
+`fetch`-shaped **data-source seam**, and the **offline runtime** supplies an
+in-browser adapter so the editor, tree, links, search, and autosave loop run
+entirely against the browser engine with no server (see **offline runtime**).
+
+### Browser git engine
+
+The IndexedDB-backed implementation of the **git engine**'s write seam
+(`WritableGitEngine`) for the **offline PWA** — the browser counterpart to the
+server's `NodeGitEngine`. It drives real git (`isomorphic-git`) against a
+`@isomorphic-git/lightning-fs` filesystem persisted in IndexedDB, with
+**commit-on-save** semantics identical to the server's: list the `.md` files at
+`HEAD`, read one note (path-escape-guarded), write + commit an edited note
+(skipping no-op writes, so no empty commits), and idempotently init + seed the repo
+on first run (`ensureBrowserRepo`, mirroring `ensureWorkspaceRepo`). The pure path
+maths (safety guard, joins, ancestor dirs, tracked-file → note-file mapping) is
+split out and unit-tested; the engine itself is the thin IO over the two libraries
+and runs only in a real browser (it needs IndexedDB), not the offline test suite.
+
+### Sync cadence
+
+The policy for **when** a multi-device sync runs, decided by the pure
+`core/sync-cadence` `SyncScheduler` — which owns no DOM and no real timer, running
+a single injected sync action on five **triggers**: **launch** (a freshly-opened
+tab reconciles immediately), **reconnect** (the network just returned), **focus**
+(the tab regained focus / became visible), **timer** (a periodic tick), and
+**manual** (a "Sync now" action). Three properties make repeated, overlapping
+triggers safe: it is **single-flight** (one sync at a time), **coalescing**
+(triggers arriving mid-flight collapse into one follow-up, keeping the stronger
+trigger — manual > reconnect > launch > timer > focus), and **throttling** (only
+`focus` is rate-limited; the deliberate triggers always run). The browser binding
+(`sync-cadence-controller.ts`) is the thin adapter that maps `online` → reconnect,
+window focus / visibility → focus, a `setInterval` → timer, construction → launch,
+and a manual call → manual, over injectable event targets and clock.
+
+### Conflict
+
+What a multi-device sync does when the same note was edited two ways. Resolution
+is the pure three-way (base / local / incoming) reconciliation in `core/conflict`,
+over a note's **canonical Markdown** (all three versions canonicalized first, so
+formatting-only differences never count). **Non-overlapping** concurrent edits
+**auto-merge** (a line-level diff3) into one clean result. A genuine, overlapping
+**true conflict** keeps **both** versions with **zero data loss**: the incoming
+`main` version stays on the note, and the **local** version is preserved as a
+**conflict copy** — a new sibling **leaf note** named from the original plus a UTC
+marker (`YYYYMMDD-HHmmss`), its **frontmatter** `title` set to read cleanly, its
+identity de-duplicated against existing notes. The decision is expressed as
+backing-file writes through the same `WritableGitEngine` seam (`applyConflictResolution`),
+so it drives the **browser git engine** identically to any other. A **conflict
+notification** then informs the user — never overwrite, always keep-both.
+
+### Conflict notification
+
+The **non-blocking** way the user learns a **conflict copy** was created: a small,
+dismissible **toast** in a polite live region (`role="status"`,
+`aria-live="polite"`) anchored to a corner — never a modal, never a blocked
+editor. Each toast states what happened and offers **"Open copy"** (navigates to
+the saved sibling note through the same navigation the **note tree** and wikilinks
+use) and **"Dismiss"**. The `core/conflict` policy emits a `ConflictNotification`
+per conflict; the workspace owns the toast list and surfaces it over the whole UI
+while the editor stays fully interactive behind it.
+
+### Offline runtime
+
+How the **offline PWA** runs the *same* `App` with **no server** and **no UI
+fork**. The whole workspace reads and writes through a single injectable
+`fetch`-shaped **data-source seam** (default the global `fetch`): the web server
+and the **local-first desktop** leave it unset and talk to `/api/*`, while the
+offline runtime injects an in-browser adapter (`createBrowserApiFetch`) that
+answers the *same* `/api/*` contracts locally by running the *same* `@stout/core`
+compositions against the **browser git engine** — note tree, note read/write,
+links, keyword search, and the autosave loop (offline is a single writer, so a
+**commit-on-save** wip engine commits each autosave straight to `main`). Note
+**mutations** and **attachments** are not yet implemented in the browser engine
+and return a graceful `501`. A client-side **sync runner** reconciles with a
+remote on the **sync cadence**'s triggers and forwards each **conflict
+notification** to the toast, degrading to a no-op when there is no remote. The
+composition root (`startOfflineApp`) seeds the repo, builds the engine + adapter +
+cadence controller, and renders the workspace; one built SPA chooses the runtime
+at load from the URL (`?runtime=offline`), which the PWA manifest's `start_url`
+requests so the installed app boots offline while the web app at `/` stays on the
+server.
+
+
 
 The deep module (`core/git-engine`) that reads and writes the working clone. The
 read contract (`GitEngine.listNoteFiles`/`readNoteFile`, `readNoteTree`/`readNote`)
@@ -337,8 +431,12 @@ healthy state, not a fault.
   the Editor seam in `packages/ui`.
 - **Git is the single source of truth.** Postgres (vector index + derived
   metadata) is disposable and rebuildable from the repo; it is never canonical.
-- **One UI, two runtimes.** The web server and the **local-first desktop** serve
-  the *same* `@stout/ui` build over the *same* `/api/*` surface; only the backing
-  differs (Postgres + bare repo vs. a local clone + in-memory index). There is no
-  per-runtime UI fork, and the **hub token** never leaves the OS keychain in
-  plaintext.
+- **One UI, three runtimes.** The web server, the **local-first desktop**, and the
+  **offline PWA** all serve the *same* `@stout/ui` build through the *same*
+  `core/git-engine` seam; only the backing differs (Postgres + bare repo, a local
+  clone + in-memory index, or an IndexedDB clone via the **browser git engine**).
+  There is no per-runtime UI fork, and the **hub token** never leaves the OS
+  keychain in plaintext.
+- **Zero data loss on conflict.** A multi-device **conflict** never overwrites a
+  user's words: non-overlapping edits auto-merge, and a true conflict keeps both
+  versions (the incoming on the note, the local as a **conflict copy**).

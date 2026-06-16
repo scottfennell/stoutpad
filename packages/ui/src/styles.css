@@ -801,6 +801,68 @@ body {
 }
 
 /* ===========================================================================
+ * Conflict toasts: a non-blocking, dismissible stack anchored to the corner.
+ *
+ * Surfaced when a multi-device sync keeps the incoming version and saves the
+ * local one as a conflict-copy sibling (see ADR 0011). Never a modal — the
+ * editor stays fully interactive — and a polite live region for assistive tech.
+ * ========================================================================= */
+
+.conflict-toasts {
+  position: fixed;
+  right: var(--gutter);
+  bottom: var(--gutter);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(360px, calc(100vw - 2 * var(--gutter)));
+}
+.conflict-toast {
+  background: var(--color-surface-container-high);
+  border: 1px solid var(--color-outline-variant);
+  border-left: 3px solid var(--color-primary);
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.conflict-toast__message {
+  margin: 0 0 8px;
+  font-size: var(--text-body-md);
+  color: var(--color-on-surface);
+}
+.conflict-toast__actions {
+  display: flex;
+  gap: 8px;
+}
+.conflict-toast__action,
+.conflict-toast__dismiss {
+  appearance: none;
+  font: inherit;
+  font-size: var(--text-label-sm);
+  cursor: pointer;
+  border-radius: var(--radius);
+  padding: 4px 10px;
+}
+.conflict-toast__action {
+  background: var(--color-primary);
+  color: var(--color-on-primary);
+  border: none;
+}
+.conflict-toast__dismiss {
+  background: transparent;
+  color: var(--color-on-surface-variant);
+  border: 1px solid var(--color-outline-variant);
+}
+.conflict-toast__action:hover {
+  background: var(--color-primary-container);
+}
+.conflict-toast__dismiss:hover {
+  color: var(--color-on-surface);
+  border-color: var(--color-outline);
+}
+
+/* ===========================================================================
  * Responsive: collapse the three-panel grid to a focused single column.
  *
  * < 1024px → single column; the active pane (data-mobile-pane on .app-shell)

@@ -5,6 +5,7 @@ import {
   render,
   screen,
   waitFor,
+  act,
 } from "@testing-library/react";
 import { App } from "./App.js";
 import type { EditorComponent } from "./editor.js";
@@ -19,6 +20,7 @@ import {
   SEARCH_PATH,
   SYNC_PATH,
   TREE_PATH,
+  type ConflictNotification,
   type HealthStatus,
   type LinkGraphResponse,
   type NoteContentResponse,
@@ -844,5 +846,72 @@ describe("App utility panel", () => {
         screen.getByTestId("note-content").getAttribute("data-note-path"),
       ).toBe("projects"),
     );
+  });
+});
+
+describe("App conflict notifications", () => {
+  const notification: ConflictNotification = {
+    notePath: "notes",
+    noteTitle: "Notes",
+    copyPath: "notes (conflict 20240101-000000)",
+    copyTitle: "Notes (conflict 20240101-000000)",
+    message: "Conflicting edits to Notes were saved as a copy.",
+  };
+
+  it("surfaces a conflict copy as a non-blocking toast and opens the copy", async () => {
+    const copy: NoteContentResponse = {
+      path: notification.copyPath,
+      file: `${notification.copyPath}.md`,
+      markdown: "# Notes (conflict 20240101-000000)\n",
+    };
+    stubApi({
+      [HEALTH_PATH]: health,
+      [TREE_PATH]: tree,
+      [`${NOTE_PATH}?path=${encodeURIComponent(copy.path)}`]: copy,
+    });
+
+    // The conflict sink is handed a `notify` handle on mount; the PWA sync
+    // runtime would drive it, here the test does.
+    let notify: ((n: ConflictNotification) => void) | null = null;
+    render(<App Editor={FakeEditor} onConflicts={(fn) => (notify = fn)} />);
+    await waitFor(() => expect(notify).not.toBeNull());
+
+    // Nothing is shown until a conflict actually happens — quiet by default.
+    expect(screen.queryByTestId("conflict-toasts")).toBeNull();
+
+    act(() => notify!(notification));
+
+    // The toast lands in a polite live region (never a modal), stating what
+    // happened, with the editor still fully interactive behind it.
+    const toasts = await screen.findByTestId("conflict-toasts");
+    expect(toasts.getAttribute("role")).toBe("status");
+    expect(toasts.getAttribute("aria-live")).toBe("polite");
+    expect(screen.getByTestId("conflict-toast").textContent).toContain(
+      "saved as a copy",
+    );
+
+    // "Open copy" navigates the center panel to the saved sibling note — the
+    // same navigation the tree and wikilinks use, so the user never loses work.
+    fireEvent.click(screen.getByTestId("conflict-open-copy"));
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("note-content").getAttribute("data-note-path"),
+      ).toBe(copy.path),
+    );
+  });
+
+  it("dismisses a conflict toast on request", async () => {
+    stubApi({ [HEALTH_PATH]: health, [TREE_PATH]: tree });
+
+    let notify: ((n: ConflictNotification) => void) | null = null;
+    render(<App Editor={FakeEditor} onConflicts={(fn) => (notify = fn)} />);
+    await waitFor(() => expect(notify).not.toBeNull());
+
+    act(() => notify!(notification));
+    expect(await screen.findByTestId("conflict-toast")).toBeTruthy();
+
+    // Dismissal removes the toast entirely; the workspace was never blocked.
+    fireEvent.click(screen.getByTestId("conflict-dismiss"));
+    await waitFor(() => expect(screen.queryByTestId("conflict-toast")).toBeNull());
   });
 });
