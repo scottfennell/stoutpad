@@ -66,3 +66,22 @@ export function noteFileCandidates(path: string): string[] {
   if (clean === "") return [INDEX_FILE];
   return [`${clean}.md`, `${clean}/${INDEX_FILE}`];
 }
+
+/** Identity (tree `path`) of the parent-note `_index.md` stem, e.g. `_index`. */
+const INDEX_STEM = INDEX_FILE.replace(/\.md$/iu, "");
+
+/**
+ * Resolve a repo-relative backing **file** to the note **identity** it backs —
+ * the inverse of {@link noteFileCandidates} for a single file.
+ *
+ * A leaf file `dir/name.md` backs `dir/name`; a parent file `dir/_index.md` backs
+ * the directory `dir`; the repo-root `_index.md` backs the root note (`""`). This
+ * is the same identity {@link buildNoteTree} assigns, so mapping a file list
+ * through here agrees with the tree. Pure.
+ */
+export function noteIdentityForFile(file: string): string {
+  const clean = normalizeNotePath(file);
+  if (clean === INDEX_STEM) return "";
+  if (clean.endsWith(`/${INDEX_STEM}`)) return clean.slice(0, -(INDEX_STEM.length + 1));
+  return clean;
+}

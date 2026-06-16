@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   noteFileCandidates,
+  noteIdentityForFile,
   normalizeNotePath,
   readNote,
   type GitEngine,
@@ -33,6 +34,28 @@ describe("noteFileCandidates", () => {
 
   it("normalizes slashes and the .md extension out of the identity", () => {
     expect(normalizeNotePath("/projects/ideas.md/")).toBe("projects/ideas");
+  });
+});
+
+describe("noteIdentityForFile", () => {
+  it("maps a leaf file to its identity", () => {
+    expect(noteIdentityForFile("projects/ideas.md")).toBe("projects/ideas");
+  });
+
+  it("maps a parent _index.md to the directory identity", () => {
+    expect(noteIdentityForFile("projects/_index.md")).toBe("projects");
+  });
+
+  it("maps the repo-root _index.md to the root identity", () => {
+    expect(noteIdentityForFile("_index.md")).toBe("");
+  });
+
+  it("round-trips with noteFileCandidates for both note kinds", () => {
+    for (const id of ["", "projects", "projects/ideas"]) {
+      for (const file of noteFileCandidates(id)) {
+        expect(noteIdentityForFile(file)).toBe(id);
+      }
+    }
   });
 });
 

@@ -105,7 +105,7 @@ export async function ensureWorkspaceRepo(paths: RepoPaths): Promise<void> {
  * tree the read/commit-on-save paths see is always `main`.
  */
 export class NodeGitEngine implements WipGitEngine, MutatingGitEngine, AttachmentGitEngine {
-  constructor(private readonly cloneDir: string) {}
+  constructor(protected readonly cloneDir: string) {}
 
   async listNoteFiles(): Promise<NoteFile[]> {
     const { stdout } = await this.git(["ls-files", "-z"]);

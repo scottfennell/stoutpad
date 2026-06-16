@@ -4,11 +4,16 @@ import {
   applyNoteSync,
   ASSETS_DIR,
   createNote,
+  DEFAULT_SYNC_PERIOD_MS,
+  InMemoryTokenStore,
   moveNote,
   readLinkGraph,
   readNote,
   readNoteTree,
+  redactRemoteUrl,
   renameNote,
+  SyncScheduler,
+  syncRemoteBoundary,
   writeAttachment,
   writeNote,
 } from "@stout/core";
@@ -22,8 +27,8 @@ import { loadEmbedder } from "./embedder.js";
 import {
   ensureWorkspaceRepo,
   loadRepoPaths,
-  NodeGitEngine,
 } from "./git-engine.js";
+import { loadRemoteConfig, NodeRemoteBoundaryEngine } from "./remote-engine.js";
 import { runMigrations } from "./migrate.js";
 import { migrations } from "./migrations.js";
 import { createSearchService } from "./search.js";
@@ -48,7 +53,7 @@ async function main(): Promise<void> {
   // First-boot: init the bare repo + working clone seeded with a starter note.
   const repoPaths = loadRepoPaths();
   await ensureWorkspaceRepo(repoPaths);
-  const gitEngine = new NodeGitEngine(repoPaths.cloneDir);
+  const gitEngine = new NodeRemoteBoundaryEngine(repoPaths.cloneDir);
   console.log(`[stout] note repository ready at ${repoPaths.cloneDir}`);
 
   // Semantic search: a locally-run embedding model (hashing fallback when it is
@@ -128,6 +133,47 @@ async function main(): Promise<void> {
     console.log("[stout] building search index in the background");
     rebuildSearch();
   });
+
+  // Optional external remote: when configured, the server stays the clients' sync
+  // hub but tracks an external Git remote (e.g. GitHub) that other actors can also
+  // write to, pulling/pushing on a loop and merging divergent history at the
+  // boundary with the `core/conflict` policy. Unset ⇒ internal bare repo only.
+  startRemoteSyncLoop(gitEngine, rebuildSearch);
+}
+
+/**
+ * Start the external-remote sync loop when `STOUT_REMOTE_URL` is configured.
+ *
+ * Drives `syncRemoteBoundary` through the pure `SyncScheduler` (single-flight +
+ * coalescing) on launch and on a periodic timer. Each run merges divergent
+ * external history with the conflict policy; conflict copies are logged (the
+ * server has no UI) and the search index is rebuilt after a sync changed `main`.
+ * Failures (e.g. a push rejected because the remote moved) only log and are
+ * retried on the next tick — they never crash the server.
+ */
+function startRemoteSyncLoop(
+  engine: NodeRemoteBoundaryEngine,
+  rebuildSearch: () => void,
+): void {
+  const remote = loadRemoteConfig();
+  if (remote === null) return;
+
+  const tokenStore = new InMemoryTokenStore(remote.token);
+  console.log(
+    `[stout] external remote sync enabled for ${redactRemoteUrl(remote.config.remoteUrl)}`,
+  );
+
+  const scheduler = new SyncScheduler(async () => {
+    const result = await syncRemoteBoundary(engine, tokenStore, remote.config);
+    for (const conflict of result.conflicts) {
+      console.warn(`[stout] external-remote conflict: ${conflict.message}`);
+    }
+    if (result.action === "sync") rebuildSearch(); // main may have changed
+  });
+
+  const log = (err: unknown): void => console.error("[stout] external remote sync failed", err);
+  void scheduler.request("launch").catch(log);
+  setInterval(() => void scheduler.tick().catch(log), DEFAULT_SYNC_PERIOD_MS).unref();
 }
 
 async function checkDatabase(pool: pg.Pool): Promise<boolean> {

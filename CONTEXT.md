@@ -262,6 +262,41 @@ the single source of truth and the (future) git remote clients sync against. On
 first boot the server initializes the bare repo, clones a working clone from it,
 seeds a starter `_index.md`, and pushes that seed back to the bare repo.
 
+### External remote
+
+The optional, server-side-configured Git remote (e.g. a GitHub repo) the web
+server can track *instead of being an island around its* **bare repo**. By default
+none is set and the server uses only its bare repo. When `STOUT_REMOTE_URL` is set,
+the server **stays the sync hub** the clients see but additionally pulls-from and
+pushes-to that external remote on its sync loop — the server-side counterpart to
+the desktop's **hub**. Because *other actors* (a teammate, a laptop `git push`, CI)
+can also write to it, its history can **diverge** from the server's `main`, so each
+sync performs a **server boundary merge**. Its access credential is a server-side
+secret (`STOUT_REMOTE_TOKEN`), never sent to clients, never written to `.git/config`,
+never logged in plaintext, materialised into a URL only for a single git op
+(reusing the **hub token** credential maths). Clients stay completely unaware it
+exists — no client-facing contract changes.
+
+### Server boundary merge
+
+How the server integrates an **external remote**'s divergent history into `main`
+**without losing data** — and the reason a plain `git merge` is *not* used. The
+policy is the pure `core/remote-sync` (`syncRemoteBoundary` over the narrow
+`RemoteBoundaryEngine` seam): fetch the external branch, and for every note that
+differs, reconcile its three versions (**base** = merge base, **local** = server
+`main`, **incoming** = external tip) with the very same `core/conflict`
+**conflict** policy the multi-device story uses — non-overlapping edits
+**auto-merge**, a true conflict keeps **both** (incoming on the note, local as a
+**conflict copy**), an external-only note is **adopted**, and an external *deletion*
+is *not* propagated (keep-both bias). The reconciled tree is written to `main`
+first; only then is a bookkeeping merge commit recorded (`git merge -s ours`, which
+keeps our tree and merely adds the external tip as a second parent) so the push is a
+fast-forward. **Git never merges content** — the conflict policy does; git is just
+plumbing to make the push linear. The Node mechanism (`fetch`/`diff`/`show`/the
+`-s ours` commit/`push`) is `NodeRemoteBoundaryEngine` in `apps/server`, the
+external-remote counterpart to the **git engine**'s `NodeGitEngine`. On the server
+(no UI) a resulting **conflict notification** is logged rather than toasted.
+
 ### Hub
 
 The remote Git repository the **local-first desktop** clones its **working clone**
@@ -439,4 +474,12 @@ healthy state, not a fault.
   keychain in plaintext.
 - **Zero data loss on conflict.** A multi-device **conflict** never overwrites a
   user's words: non-overlapping edits auto-merge, and a true conflict keeps both
-  versions (the incoming on the note, the local as a **conflict copy**).
+  versions (the incoming on the note, the local as a **conflict copy**). The same
+  policy reconciles an **external remote**'s divergent history at the **server
+  boundary merge**, so integrating outside work is keep-both too — git never merges
+  content.
+- **The server may track an external remote, invisibly to clients.** The
+  source-of-truth repo is configurable: by default the server uses its internal
+  **bare repo**; optionally (`STOUT_REMOTE_URL`) it also syncs an **external
+  remote** (e.g. GitHub). The remote's credential is a server-side secret and no
+  client-facing contract changes — clients neither know nor care.

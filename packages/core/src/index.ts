@@ -15,7 +15,10 @@
  * cosine ranking + keyword fallback) behind `GET /api/search`, and the
  * local-first desktop seams: `core/token-store` (the secret-at-rest TokenStore +
  * SecureStorage/SecureFilePorts seams) and `core/hub-sync` (the pure
- * clone-then-sync orchestrator + token-in-URL credential maths).
+ * clone-then-sync orchestrator + token-in-URL credential maths), plus
+ * `core/remote-sync` (the configurable external-remote boundary merge: the pure
+ * `reconcileNotesWithIncoming` policy + the `syncRemoteBoundary` orchestrator that
+ * fetches, merges divergent history with the `core/conflict` policy, and pushes).
  * Everything here is runtime-agnostic — the Node/Git and editor (DOM)
  * implementations live in `apps/server` and `packages/ui`.
  */
@@ -33,6 +36,7 @@ export * from "./attachment.js";
 export * from "./search-index.js";
 export * from "./token-store.js";
 export * from "./hub-sync.js";
+export * from "./remote-sync.js";
 
 /** Health status reported by the server's `/api/health` endpoint. */
 export interface HealthStatus {
