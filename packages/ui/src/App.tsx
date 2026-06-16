@@ -4,14 +4,18 @@ import {
   DEFAULT_DEBOUNCE_MS,
   deriveTitle,
   HEALTH_PATH,
+  LINKS_PATH,
   NOTE_PATH,
   NoteSync,
+  parseInline,
   parseMarkdown,
   resolveTitle,
   serializeMarkdown,
   TREE_PATH,
   type Frontmatter,
   type HealthStatus,
+  type LinkGraph,
+  type LinkGraphResponse,
   type NoteContentResponse,
   type NoteNode,
   type NoteTreeResponse,
@@ -144,6 +148,42 @@ export function useNote(
   }, [path, fetchImpl]);
 
   return result;
+}
+
+/** The empty link graph: the inert default before `/api/links` answers. */
+const EMPTY_LINK_GRAPH: LinkGraph = { edges: [], broken: [] };
+
+/**
+ * Fetch the whole-repo {@link LinkGraph} (`GET /api/links`) for the utilities
+ * panel's backlinks / outbound-links view. Degrades **gracefully**: a missing or
+ * failing endpoint resolves to the empty graph rather than surfacing an error, so
+ * the contextual panel simply shows no links instead of breaking the workspace.
+ * Refetched when `reloadToken` bumps (a mutation reshapes the graph).
+ */
+export function useLinks(
+  fetchImpl: typeof fetch = fetch,
+  reloadToken: number = 0,
+): LinkGraph {
+  const [graph, setGraph] = useState<LinkGraph>(EMPTY_LINK_GRAPH);
+
+  useEffect(() => {
+    let active = true;
+    fetchImpl(LINKS_PATH)
+      .then((res) =>
+        res.ok ? (res.json() as Promise<LinkGraphResponse>) : EMPTY_LINK_GRAPH,
+      )
+      .then((g) => {
+        if (active) setGraph(g);
+      })
+      .catch(() => {
+        if (active) setGraph(EMPTY_LINK_GRAPH);
+      });
+    return () => {
+      active = false;
+    };
+  }, [fetchImpl, reloadToken]);
+
+  return graph;
 }
 
 /**
@@ -281,17 +321,6 @@ export function useNoteSync(
 /** A note-tree mutation requested from a node's affordances. */
 type TreeMutation = "create" | "rename" | "move";
 
-const ACTION_BUTTON_STYLE = {
-  appearance: "none",
-  background: "transparent",
-  border: "none",
-  color: "#9aa0a3",
-  cursor: "pointer",
-  font: "inherit",
-  fontSize: "0.8em",
-  padding: "0 0.25rem",
-} as const;
-
 function NoteTreeItem({
   node,
   selectedPath,
@@ -307,60 +336,52 @@ function NoteTreeItem({
   const isRoot = node.path === "";
   return (
     <li>
-      <span style={{ display: "flex", alignItems: "center", gap: "0.15rem" }}>
+      <span className="tree__row" data-selected={isSelected}>
         <button
           type="button"
+          className="tree__button"
           data-testid="note-title"
           aria-current={isSelected ? "true" : undefined}
           onClick={() => onSelect(node.path)}
-          style={{
-            appearance: "none",
-            background: isSelected ? "#2b2f31" : "transparent",
-            border: "none",
-            color: "inherit",
-            cursor: "pointer",
-            font: "inherit",
-            flex: 1,
-            padding: "0.15rem 0.35rem",
-            textAlign: "left",
-          }}
         >
           {node.title}
         </button>
-        <button
-          type="button"
-          aria-label={`New note under ${node.title}`}
-          title="New child note"
-          onClick={() => onMutate("create", node)}
-          style={ACTION_BUTTON_STYLE}
-        >
-          +
-        </button>
-        {!isRoot && (
-          <>
-            <button
-              type="button"
-              aria-label={`Rename ${node.title}`}
-              title="Rename note"
-              onClick={() => onMutate("rename", node)}
-              style={ACTION_BUTTON_STYLE}
-            >
-              ✎
-            </button>
-            <button
-              type="button"
-              aria-label={`Move ${node.title}`}
-              title="Move note"
-              onClick={() => onMutate("move", node)}
-              style={ACTION_BUTTON_STYLE}
-            >
-              ⇄
-            </button>
-          </>
-        )}
+        <span className="tree__actions">
+          <button
+            type="button"
+            className="tree__action"
+            aria-label={`New note under ${node.title}`}
+            title="New child note"
+            onClick={() => onMutate("create", node)}
+          >
+            +
+          </button>
+          {!isRoot && (
+            <>
+              <button
+                type="button"
+                className="tree__action"
+                aria-label={`Rename ${node.title}`}
+                title="Rename note"
+                onClick={() => onMutate("rename", node)}
+              >
+                ✎
+              </button>
+              <button
+                type="button"
+                className="tree__action"
+                aria-label={`Move ${node.title}`}
+                title="Move note"
+                onClick={() => onMutate("move", node)}
+              >
+                ⇄
+              </button>
+            </>
+          )}
+        </span>
       </span>
       {node.children.length > 0 && (
-        <ul style={{ listStyle: "none", margin: 0, paddingLeft: "1rem" }}>
+        <ul className="tree">
           {node.children.map((child) => (
             <NoteTreeItem
               key={child.path}
@@ -376,16 +397,39 @@ function NoteTreeItem({
   );
 }
 
+/** The Stout brand lockup at the top of the navigation panel. */
+function BrandHeader() {
+  return (
+    <div className="brand">
+      <div className="brand__mark" aria-hidden="true">
+        S
+      </div>
+      <div>
+        <h1 className="brand__name">Stout</h1>
+        <p className="brand__sub">Personal Notes</p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The left navigation panel: brand, the "New Note" CTA (creates under the root
+ * note), the search box, and the note tree with per-node create/rename/move
+ * affordances. All mutations post through the mutation client, then reselect the
+ * affected note and reload the (reshaped) tree.
+ */
 function NavPanel({
   treeResult,
   selectedPath,
   onSelect,
   onReload,
+  debounceMs,
 }: {
   treeResult: TreeFetched;
   selectedPath: string | null;
   onSelect: (path: string) => void;
   onReload: () => void;
+  debounceMs?: number;
 }) {
   const [error, setError] = useState<string | null>(null);
 
@@ -422,40 +466,58 @@ function NavPanel({
     [onSelect, onReload],
   );
 
+  const root = treeResult.state === "ready" ? treeResult.tree.root : null;
+
   return (
-    <nav
-      aria-label="Notes"
-      style={{
-        flex: "0 0 16rem",
-        borderRight: "1px solid #50453b",
-        padding: "1.5rem",
-        background: "#191c1d",
-        color: "#e1e3e4",
-      }}
+    <aside
+      className="panel panel--nav"
+      data-testid="nav-panel"
+      aria-label="Navigation"
     >
-      <h2 style={{ fontSize: "0.75rem", letterSpacing: "0.05em", textTransform: "uppercase" }}>
-        Notes
-      </h2>
-      {error !== null && (
-        <p role="alert" style={{ color: "#e6a3a3" }}>
-          {error}
-        </p>
-      )}
-      {treeResult.state === "loading" && <p>Loading notes…</p>}
-      {treeResult.state === "error" && (
-        <p role="alert">Could not load notes: {treeResult.message}</p>
-      )}
-      {treeResult.state === "ready" && (
-        <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
-          <NoteTreeItem
-            node={treeResult.tree.root}
-            selectedPath={selectedPath}
-            onSelect={onSelect}
-            onMutate={handleMutate}
-          />
-        </ul>
-      )}
-    </nav>
+      <div className="nav__header">
+        <BrandHeader />
+        <button
+          type="button"
+          className="btn btn--primary"
+          disabled={root === null}
+          onClick={() => root && handleMutate("create", root)}
+        >
+          <span className="btn__icon" aria-hidden="true">
+            +
+          </span>
+          New Note
+        </button>
+      </div>
+      <div className="panel__scroll">
+        <div className="nav__body">
+          <SearchPanel onSelect={onSelect} debounceMs={debounceMs} />
+          <nav aria-label="Notes">
+            <h2 className="nav-heading">Files</h2>
+            {error !== null && (
+              <p role="alert" className="alert">
+                {error}
+              </p>
+            )}
+            {treeResult.state === "loading" && <p className="muted">Loading notes…</p>}
+            {treeResult.state === "error" && (
+              <p role="alert" className="alert">
+                Could not load notes: {treeResult.message}
+              </p>
+            )}
+            {treeResult.state === "ready" && (
+              <ul className="tree">
+                <NoteTreeItem
+                  node={treeResult.tree.root}
+                  selectedPath={selectedPath}
+                  onSelect={onSelect}
+                  onMutate={handleMutate}
+                />
+              </ul>
+            )}
+          </nav>
+        </div>
+      </div>
+    </aside>
   );
 }
 
@@ -471,29 +533,13 @@ function SearchResultItem({
     <li>
       <button
         type="button"
+        className="search-result"
         data-testid="search-result"
         data-result-path={result.path}
         onClick={() => onSelect(result.path)}
-        style={{
-          appearance: "none",
-          background: "transparent",
-          border: "none",
-          color: "inherit",
-          cursor: "pointer",
-          font: "inherit",
-          display: "block",
-          width: "100%",
-          textAlign: "left",
-          padding: "0.35rem 0.5rem",
-          borderRadius: "0.25rem",
-        }}
       >
-        <span style={{ display: "block", color: "#f2be8c" }}>
-          {result.title || "Home"}
-        </span>
-        <span style={{ display: "block", fontSize: "0.8em", color: "#9aa0a3" }}>
-          {result.snippet}
-        </span>
+        <span className="search-result__title">{result.title || "Home"}</span>
+        <span className="search-result__snippet">{result.snippet}</span>
       </button>
     </li>
   );
@@ -516,42 +562,35 @@ function SearchPanel({
   const result = useSearch(query, { debounceMs });
 
   return (
-    <section aria-label="Search" style={{ marginBottom: "1.5rem" }}>
+    <section aria-label="Search" className="search">
       <input
         type="search"
         aria-label="Search notes"
         placeholder="Search notes…"
         data-testid="search-input"
+        className="search__input"
         value={query}
         onChange={(event) => setQuery(event.target.value)}
-        style={{
-          width: "100%",
-          boxSizing: "border-box",
-          padding: "0.4rem 0.6rem",
-          background: "#191c1d",
-          border: "1px solid #50453b",
-          borderRadius: "0.25rem",
-          color: "#e1e3e4",
-          font: "inherit",
-        }}
       />
-      {result.state === "loading" && <p data-testid="search-status">Searching…</p>}
+      {result.state === "loading" && (
+        <p data-testid="search-status" className="search-meta">
+          Searching…
+        </p>
+      )}
       {result.state === "error" && (
-        <p role="alert">Search failed: {result.message}</p>
+        <p role="alert" className="alert">
+          Search failed: {result.message}
+        </p>
       )}
       {result.state === "ready" && (
-        <div data-testid="search-results">
+        <div data-testid="search-results" className="search-results">
           {result.response.results.length === 0 ? (
-            <p data-testid="search-empty">No matches.</p>
+            <p data-testid="search-empty" className="search-meta">
+              No matches.
+            </p>
           ) : (
             <>
-              <p
-                style={{
-                  fontSize: "0.7rem",
-                  color: "#9aa0a3",
-                  margin: "0.5rem 0 0.25rem",
-                }}
-              >
+              <p className="search-meta">
                 {result.response.results.length} result
                 {result.response.results.length === 1 ? "" : "s"} ·{" "}
                 <span data-testid="search-mode">{result.response.mode}</span>
@@ -569,27 +608,34 @@ function SearchPanel({
   );
 }
 
+/**
+ * The center panel: renders the selected note (header + editor) or an empty
+ * prompt. The note fetch is lifted to {@link App}, so the same result drives both
+ * this panel and the contextual utilities panel.
+ */
 function NotePanel({
-  selectedPath,
+  result,
   Editor,
   debounceMs,
   wikiLinks,
 }: {
-  selectedPath: string | null;
+  result: NoteFetched;
   Editor: EditorComponent;
   debounceMs?: number;
   wikiLinks?: WikiLinkContext;
 }) {
-  const result = useNote(selectedPath);
-
   return (
-    <section aria-label="Note" style={{ marginBottom: "2rem" }}>
+    <section aria-label="Note" className="note-section">
       {result.state === "idle" && (
-        <p data-testid="note-empty">Select a note to open it.</p>
+        <p data-testid="note-empty" className="note-empty muted">
+          Select a note to open it.
+        </p>
       )}
-      {result.state === "loading" && <p>Loading note…</p>}
+      {result.state === "loading" && <p className="note-empty muted">Loading note…</p>}
       {result.state === "error" && (
-        <p role="alert">Could not load note: {result.message}</p>
+        <p role="alert" className="alert" style={{ padding: "var(--panel-padding)" }}>
+          Could not load note: {result.message}
+        </p>
       )}
       {result.state === "ready" && (
         // Keyed on the note identity so switching notes remounts the editor with
@@ -664,34 +710,37 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
-/** The note's metadata header: its display title plus its tags rendered as chips. */
-function NoteHeader({ title, tags }: { title: string; tags: string[] }) {
+/**
+ * The note's metadata header: a mono eyebrow (kind badge + backing file path),
+ * the display title, and the tags rendered as chips.
+ */
+function NoteHeader({
+  title,
+  tags,
+  file,
+}: {
+  title: string;
+  tags: string[];
+  file: string | null;
+}) {
+  const badge = file?.endsWith("_index.md") ? "SECTION" : "NOTE";
   return (
-    <header style={{ marginBottom: "1.25rem" }}>
-      <h1
-        data-testid="note-title-heading"
-        style={{ margin: "0 0 0.75rem", fontSize: "1.75rem", color: "#f2be8c" }}
-      >
+    <header className="note-header">
+      <div className="note-eyebrow">
+        <span className="note-eyebrow__badge">{badge}</span>
+        {file !== null && (
+          <span className="note-eyebrow__path" data-testid="note-file">
+            {file}
+          </span>
+        )}
+      </div>
+      <h1 data-testid="note-title-heading" className="note-title">
         {title}
       </h1>
       {tags.length > 0 && (
-        <div
-          data-testid="note-tags"
-          style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}
-        >
+        <div data-testid="note-tags" className="note-tags">
           {tags.map((tag) => (
-            <span
-              key={tag}
-              data-testid="note-tag"
-              style={{
-                padding: "0.2rem 0.5rem",
-                borderRadius: "0.25rem",
-                fontSize: "0.75rem",
-                color: "#a6caff",
-                background: "rgba(113,175,255,0.1)",
-                border: "1px solid rgba(166,202,255,0.25)",
-              }}
-            >
+            <span key={tag} data-testid="note-tag" className="tag-chip">
               #{tag}
             </span>
           ))}
@@ -710,18 +759,8 @@ function AttachmentUpload({
   error: string | null;
 }) {
   return (
-    <div style={{ marginBottom: "1rem" }}>
-      <label
-        style={{
-          display: "inline-block",
-          cursor: "pointer",
-          padding: "0.25rem 0.6rem",
-          borderRadius: "0.25rem",
-          border: "1px solid #50453b",
-          color: "#d4c4b7",
-          fontSize: "0.8rem",
-        }}
-      >
+    <div className="note-toolbar">
+      <label className="attach">
         Attach image
         <input
           type="file"
@@ -736,7 +775,7 @@ function AttachmentUpload({
         />
       </label>
       {error !== null && (
-        <span role="alert" style={{ color: "#e6a3a3", marginLeft: "0.5rem" }}>
+        <span role="alert" className="attach__error">
           {error}
         </span>
       )}
@@ -810,10 +849,356 @@ function LoadedNote({
       <NoteHeader
         title={displayTitle(note.path, frontmatter)}
         tags={frontmatter?.tags ?? []}
+        file={note.file}
       />
       <AttachmentUpload onUpload={handleUpload} error={uploadError} />
-      <Editor markdown={body} onChange={handleEditorChange} wikiLinks={wikiLinks} />
+      <div className="editor-article">
+        <Editor markdown={body} onChange={handleEditorChange} wikiLinks={wikiLinks} />
+      </div>
     </article>
+  );
+}
+
+/** A note's heading, flattened for the utilities-panel outline. */
+interface OutlineEntry {
+  level: number;
+  text: string;
+}
+
+/** Strip inline Markdown markers from a heading's text (`**Bold**` → `Bold`). */
+function inlinePlainText(text: string): string {
+  return parseInline(text)
+    .map((span) => span.text)
+    .join("");
+}
+
+/** Flatten a note's headings into an outline (table of contents). Pure. */
+function noteOutline(markdown: string): OutlineEntry[] {
+  return parseMarkdown(markdown).blocks.flatMap((block) =>
+    block.type === "heading"
+      ? [{ level: block.level, text: inlinePlainText(block.text) }]
+      : [],
+  );
+}
+
+/** Find a note in the tree by its identity `path`, or `null` if absent. */
+function findNode(node: NoteNode, path: string): NoteNode | null {
+  if (node.path === path) return node;
+  for (const child of node.children) {
+    const found = findNode(child, path);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** Map every note's identity `path` → display title, for link rows. */
+function pathTitleMap(root: NoteNode): Map<string, string> {
+  const map = new Map<string, string>();
+  const visit = (node: NoteNode): void => {
+    map.set(node.path, node.title);
+    node.children.forEach(visit);
+  };
+  visit(root);
+  return map;
+}
+
+/** A single key/value row in the utilities-panel "Details" section. */
+function Detail({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="detail-row" data-testid="utility-detail">
+      <span className="detail-row__key">{label}</span>
+      <span className="detail-row__value">{value}</span>
+    </div>
+  );
+}
+
+/** Identity / backing file / kind of the selected note, from the tree. */
+function DetailsSection({
+  node,
+  selected,
+}: {
+  node: NoteNode | null;
+  selected: string;
+}) {
+  return (
+    <section aria-label="Details" className="utility-section">
+      <h3 className="utility-section__heading">Details</h3>
+      <div>
+        <Detail label="Identity" value={selected === "" ? "(root)" : selected} />
+        <Detail label="File" value={node?.file ?? "—"} />
+        <Detail label="Kind" value={node?.kind ?? "—"} />
+        {node?.kind === "parent" && (
+          <Detail label="Children" value={String(node.children.length)} />
+        )}
+      </div>
+    </section>
+  );
+}
+
+/** The selected note's heading outline (table of contents). */
+function OutlineSection({ outline }: { outline: OutlineEntry[] }) {
+  return (
+    <section aria-label="Outline" className="utility-section">
+      <h3 className="utility-section__heading">Outline</h3>
+      {outline.length === 0 ? (
+        <p className="utility-empty">No headings yet.</p>
+      ) : (
+        <ul className="outline" data-testid="note-outline">
+          {outline.map((entry, index) => (
+            <li
+              key={`${index}-${entry.text}`}
+              className="outline__item"
+              data-level={entry.level}
+            >
+              {entry.text}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/**
+ * The selected note's links, from the whole-repo link graph: who links **to** it
+ * (backlinks), what it links **to** (outbound), and any **broken** targets.
+ * Resolved rows navigate; broken rows are flagged. Reflects committed content.
+ */
+function LinksSection({
+  outbound,
+  backlinks,
+  broken,
+  titleFor,
+  onSelect,
+}: {
+  outbound: string[];
+  backlinks: string[];
+  broken: string[];
+  titleFor: (path: string) => string;
+  onSelect: (path: string) => void;
+}) {
+  const empty =
+    outbound.length === 0 && backlinks.length === 0 && broken.length === 0;
+  return (
+    <section aria-label="Links" className="utility-section">
+      <h3 className="utility-section__heading">Links</h3>
+      {empty && <p className="utility-empty">No links to or from this note.</p>}
+      {backlinks.length > 0 && (
+        <>
+          <p className="utility-subheading">Linked from</p>
+          <ul className="links" data-testid="backlinks">
+            {backlinks.map((path) => (
+              <li key={`b-${path}`}>
+                <button
+                  type="button"
+                  className="link-row"
+                  data-testid="backlink"
+                  data-path={path}
+                  onClick={() => onSelect(path)}
+                >
+                  <span className="link-row__icon" aria-hidden="true">
+                    ←
+                  </span>
+                  {titleFor(path)}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {outbound.length > 0 && (
+        <>
+          <p className="utility-subheading">Links to</p>
+          <ul className="links" data-testid="outbound-links">
+            {outbound.map((path) => (
+              <li key={`o-${path}`}>
+                <button
+                  type="button"
+                  className="link-row"
+                  data-testid="outbound-link"
+                  data-path={path}
+                  onClick={() => onSelect(path)}
+                >
+                  <span className="link-row__icon" aria-hidden="true">
+                    →
+                  </span>
+                  {titleFor(path)}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {broken.length > 0 && (
+        <>
+          <p className="utility-subheading">Broken</p>
+          <ul className="links" data-testid="broken-links">
+            {broken.map((target, index) => (
+              <li
+                key={`x-${index}-${target}`}
+                className="link-row link-row--broken"
+                data-testid="broken-link"
+              >
+                <span className="link-row__icon" aria-hidden="true">
+                  ⚠
+                </span>
+                {target}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  );
+}
+
+/** Walking-skeleton service health, kept in the utilities panel's footer. */
+function HealthSection({ health }: { health: Fetched }) {
+  return (
+    <section aria-label="System" className="utility-section">
+      <h3 className="utility-section__heading">System</h3>
+      {health.state === "loading" && <p className="utility-empty">Checking health…</p>}
+      {health.state === "error" && (
+        <p role="alert" className="alert">
+          Health check failed: {health.message}
+        </p>
+      )}
+      {health.state === "ready" && (
+        <dl className="health">
+          <dt>Status</dt>
+          <dd>
+            <span
+              className="health__dot"
+              data-ok={health.health.status === "ok"}
+              aria-hidden="true"
+            />
+            <span data-testid="status">{health.health.status}</span>
+          </dd>
+          <dt>Database</dt>
+          <dd data-testid="database">
+            {health.health.database ? "connected" : "unavailable"}
+          </dd>
+          <dt>Migration</dt>
+          <dd data-testid="migration">{health.health.migration}</dd>
+        </dl>
+      )}
+    </section>
+  );
+}
+
+/**
+ * The right contextual-utilities panel: everything about the **selected** note,
+ * reusing data already loaded — its details (tree), heading outline (note body),
+ * and links (link graph) — plus service health. Empty until a note is open.
+ */
+function UtilityPanel({
+  selected,
+  noteResult,
+  treeResult,
+  linkGraph,
+  onSelect,
+  health,
+}: {
+  selected: string | null;
+  noteResult: NoteFetched;
+  treeResult: TreeFetched;
+  linkGraph: LinkGraph;
+  onSelect: (path: string) => void;
+  health: Fetched;
+}) {
+  const root = treeResult.state === "ready" ? treeResult.tree.root : null;
+  const node = root !== null && selected !== null ? findNode(root, selected) : null;
+  const titles = useMemo(
+    () => (root !== null ? pathTitleMap(root) : new Map<string, string>()),
+    [root],
+  );
+  const titleFor = useCallback(
+    (path: string): string =>
+      titles.get(path) ?? (path === "" ? "Home" : path),
+    [titles],
+  );
+
+  const outline =
+    noteResult.state === "ready" ? noteOutline(noteResult.note.markdown) : [];
+  const outbound = linkGraph.edges
+    .filter((edge) => edge.from === selected)
+    .map((edge) => edge.to);
+  const backlinks = linkGraph.edges
+    .filter((edge) => edge.to === selected)
+    .map((edge) => edge.from);
+  const broken = linkGraph.broken
+    .filter((link) => link.from === selected)
+    .map((link) => link.target);
+
+  return (
+    <aside
+      className="panel panel--utility"
+      data-testid="utility-panel"
+      aria-label="Note context"
+    >
+      <div className="utility__header">Context</div>
+      <div className="panel__scroll">
+        <div className="utility__body">
+          {selected === null ? (
+            <p className="utility-empty" data-testid="utility-empty">
+              Open a note to see its context.
+            </p>
+          ) : (
+            <>
+              <DetailsSection node={node} selected={selected} />
+              <OutlineSection outline={outline} />
+              <LinksSection
+                outbound={outbound}
+                backlinks={backlinks}
+                broken={broken}
+                titleFor={titleFor}
+                onSelect={onSelect}
+              />
+            </>
+          )}
+          <HealthSection health={health} />
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+/** Which single panel is shown on a narrow (mobile) viewport. */
+type MobilePane = "nav" | "editor" | "utility";
+
+/**
+ * The mobile pane switcher (hidden on desktop via CSS). On a narrow viewport the
+ * workspace collapses to a single focused column; these tabs choose which panel —
+ * navigation, editor, or context — is shown. Pure presentation state, identical
+ * across runtimes.
+ */
+function MobileTabs({
+  pane,
+  onPane,
+}: {
+  pane: MobilePane;
+  onPane: (pane: MobilePane) => void;
+}) {
+  const tabs: Array<[MobilePane, string]> = [
+    ["nav", "Navigation"],
+    ["editor", "Editor"],
+    ["utility", "Context"],
+  ];
+  return (
+    <nav className="mobile-tabs" aria-label="Workspace panels">
+      {tabs.map(([id, label]) => (
+        <button
+          key={id}
+          type="button"
+          role="tab"
+          className="mobile-tab"
+          aria-selected={pane === id}
+          onClick={() => onPane(id)}
+        >
+          {label}
+        </button>
+      ))}
+    </nav>
   );
 }
 
@@ -832,11 +1217,22 @@ export interface AppProps {
 export function App({ Editor = TipTapEditor, debounceMs }: AppProps = {}) {
   const health = useHealth();
   const [selected, setSelected] = useState<string | null>(null);
-  // The note tree is fetched once here and shared by the nav (rendering) and the
-  // editor (wikilink resolution). Bumping the token refetches it after a mutation.
+  const [mobilePane, setMobilePane] = useState<MobilePane>("editor");
+  // The note tree is fetched once here and shared by the nav (rendering), the
+  // editor (wikilink resolution), and the utilities panel (details + link titles).
+  // Bumping the token refetches the tree and link graph after a mutation.
   const [reloadToken, setReloadToken] = useState(0);
   const treeResult = useTree(fetch, reloadToken);
+  const noteResult = useNote(selected);
+  const linkGraph = useLinks(fetch, reloadToken);
   const reloadTree = useCallback(() => setReloadToken((token) => token + 1), []);
+
+  // Selecting a note also focuses the editor pane, so opening a note on mobile
+  // (from the nav, a search hit, a wikilink, or a backlink) brings it into view.
+  const selectNote = useCallback((path: string) => {
+    setSelected(path);
+    setMobilePane("editor");
+  }, []);
 
   // Resolve `[[wikilinks]]` against the loaded tree, entirely client-side: build a
   // title index once per tree and hand the editor a resolver, the autocomplete
@@ -848,53 +1244,44 @@ export function App({ Editor = TipTapEditor, debounceMs }: AppProps = {}) {
     return {
       titles: index.titles,
       resolve: (target) => resolveTitle(index, target),
-      onNavigate: (path) => setSelected(path),
+      onNavigate: (path) => selectNote(path),
     };
-  }, [treeResult]);
+  }, [treeResult, selectNote]);
 
   return (
-    <div
-      style={{
-        display: "flex",
-        minHeight: "100vh",
-        fontFamily: "ui-monospace, monospace",
-      }}
-    >
-      <NavPanel
-        treeResult={treeResult}
-        selectedPath={selected}
-        onSelect={setSelected}
-        onReload={reloadTree}
-      />
-      <main style={{ flex: 1, padding: "2rem" }}>
-        <h1>Stout</h1>
-        <SearchPanel onSelect={setSelected} debounceMs={debounceMs} />
-        <NotePanel
+    <div className="app-shell" data-mobile-pane={mobilePane}>
+      <div className="workspace">
+        <NavPanel
+          treeResult={treeResult}
           selectedPath={selected}
-          Editor={Editor}
+          onSelect={selectNote}
+          onReload={reloadTree}
           debounceMs={debounceMs}
-          wikiLinks={wikiLinks}
         />
-        <section>
-          <h2>Service health</h2>
-          {health.state === "loading" && <p>Checking health…</p>}
-          {health.state === "error" && (
-            <p role="alert">Health check failed: {health.message}</p>
-          )}
-          {health.state === "ready" && (
-            <dl>
-              <dt>Status</dt>
-              <dd data-testid="status">{health.health.status}</dd>
-              <dt>Database</dt>
-              <dd data-testid="database">
-                {health.health.database ? "connected" : "unavailable"}
-              </dd>
-              <dt>Migration</dt>
-              <dd data-testid="migration">{health.health.migration}</dd>
-            </dl>
-          )}
-        </section>
-      </main>
+        <main
+          className="panel panel--editor"
+          data-testid="editor-panel"
+          aria-label="Editor"
+        >
+          <div className="panel__scroll">
+            <NotePanel
+              result={noteResult}
+              Editor={Editor}
+              debounceMs={debounceMs}
+              wikiLinks={wikiLinks}
+            />
+          </div>
+        </main>
+        <UtilityPanel
+          selected={selected}
+          noteResult={noteResult}
+          treeResult={treeResult}
+          linkGraph={linkGraph}
+          onSelect={selectNote}
+          health={health}
+        />
+      </div>
+      <MobileTabs pane={mobilePane} onPane={setMobilePane} />
     </div>
   );
 }

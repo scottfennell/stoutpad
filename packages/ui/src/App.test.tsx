@@ -11,6 +11,7 @@ import type { EditorComponent } from "./editor.js";
 import {
   ATTACHMENT_PATH,
   HEALTH_PATH,
+  LINKS_PATH,
   NOTE_CREATE_PATH,
   NOTE_MOVE_PATH,
   NOTE_PATH,
@@ -19,6 +20,7 @@ import {
   SYNC_PATH,
   TREE_PATH,
   type HealthStatus,
+  type LinkGraphResponse,
   type NoteContentResponse,
   type NoteSyncResponse,
   type NoteTreeResponse,
@@ -708,6 +710,139 @@ describe("App search", () => {
       expect(
         screen.getByTestId("note-content").getAttribute("data-note-path"),
       ).toBe("notes"),
+    );
+  });
+});
+
+describe("App workspace layout", () => {
+  it("renders the three workspace panels and the mobile pane switcher", async () => {
+    stubApi({ [HEALTH_PATH]: health, [TREE_PATH]: tree });
+
+    render(<App Editor={FakeEditor} />);
+
+    // The three regions are always in the DOM; the responsive stylesheet (loaded
+    // only by the app entry, never in tests) governs which is visible on a narrow
+    // viewport, so there is no per-runtime layout fork to test.
+    expect(await screen.findByTestId("nav-panel")).toBeTruthy();
+    expect(screen.getByTestId("editor-panel")).toBeTruthy();
+    expect(screen.getByTestId("utility-panel")).toBeTruthy();
+
+    // Each panel is a named landmark for assistive tech.
+    expect(screen.getByRole("main", { name: "Editor" })).toBeTruthy();
+    expect(screen.getByRole("complementary", { name: "Navigation" })).toBeTruthy();
+    expect(
+      screen.getByRole("complementary", { name: "Note context" }),
+    ).toBeTruthy();
+
+    // The single-column switcher offers exactly the three panes. They are tabs,
+    // not buttons, so they never collide with same-named tree / nav buttons.
+    expect(screen.getAllByRole("tab").map((el) => el.textContent)).toEqual([
+      "Navigation",
+      "Editor",
+      "Context",
+    ]);
+  });
+
+  it("keeps the context panel empty until a note is selected", async () => {
+    stubApi({ [HEALTH_PATH]: health, [TREE_PATH]: tree });
+
+    render(<App Editor={FakeEditor} />);
+
+    // The utilities panel is contextual to the open note — empty until one is.
+    expect(await screen.findByTestId("utility-empty")).toBeTruthy();
+  });
+});
+
+describe("App utility panel", () => {
+  const note: NoteContentResponse = {
+    path: "notes",
+    file: "notes.md",
+    markdown: "# Notes\n\n## Section A\n\n### Subsection\n",
+  };
+  const projects: NoteContentResponse = {
+    path: "projects",
+    file: "projects/_index.md",
+    markdown: "# Projects\n",
+  };
+  // Projects → Notes (a backlink into the open note), Notes → Ideas (outbound),
+  // and Notes → [[Ghost Note]] (a broken link).
+  const links: LinkGraphResponse = {
+    edges: [
+      { from: "projects", to: "notes" },
+      { from: "notes", to: "projects/ideas" },
+    ],
+    broken: [{ from: "notes", target: "Ghost Note" }],
+  };
+
+  it("shows the selected note's details and heading outline", async () => {
+    stubApi({
+      [HEALTH_PATH]: health,
+      [TREE_PATH]: tree,
+      [LINKS_PATH]: links,
+      [`${NOTE_PATH}?path=notes`]: note,
+    });
+
+    render(<App Editor={FakeEditor} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("note-content").getAttribute("data-note-path"),
+      ).toBe("notes"),
+    );
+
+    // Details reflect the note's tree node: identity, backing file, and kind.
+    const details = screen
+      .getAllByTestId("utility-detail")
+      .map((el) => el.textContent ?? "");
+    expect(details).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("notes"),
+        expect.stringContaining("notes.md"),
+        expect.stringContaining("leaf"),
+      ]),
+    );
+
+    // The outline flattens the note body's headings, in document order.
+    const outline = [
+      ...screen.getByTestId("note-outline").querySelectorAll("li"),
+    ].map((li) => li.textContent);
+    expect(outline).toEqual(["Notes", "Section A", "Subsection"]);
+  });
+
+  it("lists backlinks, outbound and broken links, and navigates on click", async () => {
+    stubApi({
+      [HEALTH_PATH]: health,
+      [TREE_PATH]: tree,
+      [LINKS_PATH]: links,
+      [`${NOTE_PATH}?path=notes`]: note,
+      [`${NOTE_PATH}?path=projects`]: projects,
+    });
+
+    render(<App Editor={FakeEditor} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+
+    // Backlinks: who links *to* this note (Projects), shown by title.
+    await waitFor(() =>
+      expect(
+        screen.getAllByTestId("backlink").map((el) => el.textContent),
+      ).toEqual([expect.stringContaining("Projects")]),
+    );
+    // Outbound: what this note links *to* (Ideas), by title.
+    expect(
+      screen.getAllByTestId("outbound-link").map((el) => el.textContent),
+    ).toEqual([expect.stringContaining("Ideas")]);
+    // Broken: the unresolved target title, as written.
+    expect(
+      screen.getAllByTestId("broken-link").map((el) => el.textContent),
+    ).toEqual([expect.stringContaining("Ghost Note")]);
+
+    // Following a backlink opens that note in the center panel — the same
+    // navigation the tree, search hits, and wikilinks use.
+    fireEvent.click(screen.getByTestId("backlink"));
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("note-content").getAttribute("data-note-path"),
+      ).toBe("projects"),
     );
   });
 });

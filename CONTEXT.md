@@ -8,6 +8,33 @@ git repository the user controls, presented to the user as a single hierarchy.
 
 ## Glossary
 
+### Workspace
+
+The whole UI shell: a **three-panel** layout — left **navigation panel** (brand,
+"New Note", search, the **note tree**), center **editor panel** (the open note's
+header + editor), and right **contextual utilities panel** — that collapses to a
+**single focused column** on a narrow viewport, where a bottom tab switcher
+chooses which one panel (navigation / editor / context) is shown and opening a
+note focuses the editor. Styled by the **Technical Umber** design system
+(`DESIGN.md`): one global stylesheet of palette / type / radius / spacing tokens,
+imported only at the app entry (`main.tsx`), so the shipped app is themed while
+component tests render unstyled and keep asserting on structure, not pixels.
+Responsiveness is **pure CSS** with no host branch, so the browser SPA and the
+Electron shell render identically — there is no per-runtime layout fork. Fonts are
+named-first with a system fallback, so the app never fetches anything at runtime.
+
+### Contextual utilities panel
+
+The right **workspace** panel: everything about the **selected** note, composed
+entirely from data the client already holds — its **Details** (the note's
+**note-tree** node: identity / backing file / leaf-or-parent kind), its **Outline**
+(the heading table-of-contents parsed from the note body), its **Links** (the
+note's backlinks / outbound / broken, sliced from the whole-repo **link graph**),
+and **System** (the **health status**). It is contextual — empty until a note is
+open — and adds no new network traffic beyond the existing `GET /api/links`; its
+link rows open notes through the same navigation the tree, search, and wikilinks
+use.
+
 ### Note tree
 
 The single unified hierarchy of notes the user sees. There is no separate notion
@@ -196,9 +223,9 @@ sorted `edges` (a note linking to another; self-links ignored) and `broken` link
 (a target matching no note) — a deterministic function of the notes, so the same
 content always yields byte-identical output. Exposed read-only at `GET /api/links`
 (`LINKS_PATH` / `LinkGraphResponse`), wired to the `readLinkGraph` git-engine
-composition. It is the queryable, whole-repo view of linking (the basis for a
-future backlinks panel / graph navigation); the editor does not need it, resolving
-links locally off the tree instead.
+composition. It is the queryable, whole-repo view of linking — surfaced as the
+**contextual utilities panel**'s backlinks / outbound / broken view; the editor
+does not need it, resolving links locally off the tree instead.
 
 ### Search index
 
@@ -251,7 +278,8 @@ one atomic commit). The Node implementation that touches the filesystem and the
 ### Health status
 
 Walking-skeleton liveness contract returned by `GET /api/health`: service status,
-database reachability, and current migration version.
+database reachability, and current migration version. Surfaced in the **contextual
+utilities panel**'s System section.
 
 ## Boundaries
 

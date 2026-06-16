@@ -54,9 +54,12 @@ function ensureWikiLinkStyles(): void {
   if (document.getElementById(WIKILINK_STYLE_ID)) return;
   const style = document.createElement("style");
   style.id = WIKILINK_STYLE_ID;
+  // Technical Umber (DESIGN.md / ADR 0009): resolved links take the tertiary
+  // "interactive accent" blue; broken links take the error red. Hardcoded (not
+  // CSS vars) so the styles stand alone even if the theme sheet is absent.
   style.textContent = [
-    ".wikilink{color:#7aa2f7;cursor:pointer;border-bottom:1px solid rgba(122,162,247,.45)}",
-    ".wikilink-broken{color:#e6a3a3;border-bottom:1px dashed #e6a3a3}",
+    ".wikilink{color:#a6caff;cursor:pointer;border-bottom:1px solid rgba(166,202,255,.45)}",
+    ".wikilink-broken{color:#ffb4ab;border-bottom:1px dashed #ffb4ab}",
   ].join("");
   document.head.appendChild(style);
 }
@@ -120,7 +123,7 @@ export function WikiLinkSuggestions({
         margin: 0,
         padding: "0.25rem 0",
         listStyle: "none",
-        background: "#23272a",
+        background: "#1d2021",
         border: "1px solid #50453b",
         borderRadius: "0.25rem",
         color: "#e1e3e4",
@@ -139,7 +142,7 @@ export function WikiLinkSuggestions({
             }}
             style={{
               appearance: "none",
-              background: index === activeIndex ? "#2b2f31" : "transparent",
+              background: index === activeIndex ? "#282a2b" : "transparent",
               border: "none",
               color: "inherit",
               cursor: "pointer",
