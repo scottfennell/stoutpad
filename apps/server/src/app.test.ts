@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import request from "supertest";
 import {
+  ATTACHMENT_PATH,
   HEALTH_PATH,
   LINKS_PATH,
   NOTE_CREATE_PATH,
@@ -659,6 +663,116 @@ describe("note move round-trip", () => {
     const res = await request(app)
       .post(NOTE_MOVE_PATH)
       .send({ path: "a/only", parent: "b" });
+
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("attachment upload round-trip", () => {
+  it("stores an uploaded attachment and returns its path", async () => {
+    const calls: Array<{ name: string; dataBase64: string }> = [];
+    const app = createApp({
+      getHealth: async () => okHealth,
+      saveAttachment: async (name, dataBase64) => {
+        calls.push({ name, dataBase64 });
+        return { path: "assets/diagram.png" };
+      },
+    });
+
+    const res = await request(app)
+      .post(ATTACHMENT_PATH)
+      .send({ name: "Diagram.png", dataBase64: "AQIDBA==" });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ path: "assets/diagram.png" });
+    // The name + bytes reach the saver verbatim (slug + decode are its job).
+    expect(calls).toEqual([{ name: "Diagram.png", dataBase64: "AQIDBA==" }]);
+  });
+
+  it("returns 400 when the name is missing or blank", async () => {
+    const app = createApp({
+      getHealth: async () => okHealth,
+      saveAttachment: async () => {
+        throw new Error("must not be called");
+      },
+    });
+
+    const missing = await request(app).post(ATTACHMENT_PATH).send({ dataBase64: "AQ==" });
+    const blank = await request(app)
+      .post(ATTACHMENT_PATH)
+      .send({ name: "   ", dataBase64: "AQ==" });
+
+    expect(missing.status).toBe(400);
+    expect(missing.body.error).toContain("name");
+    expect(blank.status).toBe(400);
+  });
+
+  it("returns 400 when the base64 data is missing", async () => {
+    const app = createApp({
+      getHealth: async () => okHealth,
+      saveAttachment: async () => {
+        throw new Error("must not be called");
+      },
+    });
+
+    const res = await request(app).post(ATTACHMENT_PATH).send({ name: "diagram.png" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("dataBase64");
+  });
+
+  it("returns 500 when storing the attachment fails", async () => {
+    const app = createApp({
+      getHealth: async () => okHealth,
+      saveAttachment: async () => {
+        throw new Error("disk full");
+      },
+    });
+
+    const res = await request(app)
+      .post(ATTACHMENT_PATH)
+      .send({ name: "diagram.png", dataBase64: "AQ==" });
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toContain("disk full");
+  });
+
+  it("does not mount the attachment endpoint when no saver is injected", async () => {
+    const app = createApp({ getHealth: async () => okHealth });
+
+    const res = await request(app)
+      .post(ATTACHMENT_PATH)
+      .send({ name: "diagram.png", dataBase64: "AQ==" });
+
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("attachment static hosting", () => {
+  let assetsDir: string;
+
+  beforeEach(async () => {
+    assetsDir = await mkdtemp(join(tmpdir(), "stout-assets-"));
+  });
+
+  afterEach(async () => {
+    await rm(assetsDir, { recursive: true, force: true });
+  });
+
+  it("serves stored attachments read-only at /assets", async () => {
+    await writeFile(join(assetsDir, "diagram.txt"), "hello", "utf8");
+    const app = createApp({ getHealth: async () => okHealth, assetsDir });
+
+    const res = await request(app).get("/assets/diagram.txt");
+
+    expect(res.status).toBe(200);
+    expect(res.text).toBe("hello");
+  });
+
+  it("does not host /assets when no assetsDir is configured", async () => {
+    const app = createApp({ getHealth: async () => okHealth });
+
+    const res = await request(app).get("/assets/diagram.txt");
 
     expect(res.status).toBe(404);
   });

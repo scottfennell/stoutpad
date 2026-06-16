@@ -128,6 +128,40 @@ describe("buildNoteTree", () => {
       "Workspace",
     );
   });
+
+  it("lets a leaf's frontmatter title override the file-derived title", () => {
+    const root = buildNoteTree([
+      { path: "_index.md" },
+      { path: "first_draft.md", title: "Grand Plans" },
+    ]);
+    expect(find(root, "first_draft")).toMatchObject({
+      title: "Grand Plans",
+      file: "first_draft.md",
+    });
+  });
+
+  it("lets a parent's _index frontmatter title override the folder title", () => {
+    const root = buildNoteTree([
+      { path: "_index.md" },
+      { path: "projects/_index.md", title: "Active Projects" },
+      { path: "projects/ideas.md" },
+    ]);
+    expect(find(root, "projects")!.title).toBe("Active Projects");
+  });
+
+  it("lets the root _index frontmatter title override the root title", () => {
+    const root = buildNoteTree([{ path: "_index.md", title: "My Brain" }]);
+    expect(root.title).toBe("My Brain");
+  });
+
+  it("sorts by the overriding title, not the file name", () => {
+    const root = buildNoteTree([
+      { path: "_index.md" },
+      { path: "zebra.md", title: "Aardvark" },
+      { path: "apple.md", title: "Zucchini" },
+    ]);
+    expect(root.children.map((c) => c.title)).toEqual(["Aardvark", "Zucchini"]);
+  });
 });
 
 describe("deriveTitle", () => {

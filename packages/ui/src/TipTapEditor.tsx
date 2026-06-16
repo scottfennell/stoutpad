@@ -25,6 +25,7 @@ import {
 } from "react";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
+import Image from "@tiptap/extension-image";
 import TaskItem from "@tiptap/extension-task-item";
 import TaskList from "@tiptap/extension-task-list";
 import {
@@ -39,7 +40,12 @@ import {
   refreshWikiLinkDecorations,
 } from "./wikilink-decoration.js";
 
-const BASE_EXTENSIONS = [StarterKit, TaskList, TaskItem.configure({ nested: true })];
+const BASE_EXTENSIONS = [
+  StarterKit,
+  TaskList,
+  TaskItem.configure({ nested: true }),
+  Image,
+];
 
 /** Inject the wikilink styles once, the first time an editor mounts. */
 const WIKILINK_STYLE_ID = "stout-wikilink-style";

@@ -65,9 +65,46 @@ export type MarkdownBlock =
   | { type: "bulletList"; items: string[] }
   | { type: "taskList"; items: TaskItem[] };
 
-/** A parsed note: an ordered list of top-level blocks. */
+/**
+ * Parsed YAML **frontmatter** — the small, supported subset Stout understands.
+ *
+ * Stout notes may open with a `---`-fenced YAML block carrying structured
+ * metadata. This module parses only a deliberately tiny subset (no nested maps,
+ * no anchors) so it stays pure and dependency-free: `title`, a `tags` list
+ * (flow `[a, b]` or block `- a` form), `created`/`updated` dates (kept verbatim
+ * as strings), and any other `key: value` scalars preserved in {@link extra} so
+ * unknown fields round-trip untouched.
+ */
+export interface Frontmatter {
+  /** `title:` — overrides the note's derived display title when present. */
+  title?: string;
+  /** `tags:` — rendered as chips on the note; empty array when absent. */
+  tags: string[];
+  /** `created:` date, kept verbatim as written. */
+  created?: string;
+  /** `updated:` date, kept verbatim as written. */
+  updated?: string;
+  /** Any other recognized `key: value` scalars, preserved so they round-trip. */
+  extra?: Record<string, string>;
+}
+
+/** A parsed note: optional frontmatter plus an ordered list of top-level blocks. */
 export interface MarkdownDocument {
   blocks: MarkdownBlock[];
+  /**
+   * Parsed YAML frontmatter, present only when the note opened with a non-empty
+   * `---` block. Absent (rather than empty) so notes without metadata keep the
+   * bare `{ blocks }` shape they had before frontmatter support.
+   */
+  frontmatter?: Frontmatter;
+}
+
+/** The result of splitting a note into its {@link Frontmatter} and Markdown body. */
+export interface ParsedFrontmatter {
+  /** Parsed frontmatter, or absent when the note has none (or an empty block). */
+  frontmatter?: Frontmatter;
+  /** The Markdown body after the closing `---` fence (or the whole input). */
+  body: string;
 }
 
 const HEADING = /^(#{1,6})\s+(.*)$/u;
@@ -77,10 +114,19 @@ const BULLET_ITEM = /^\s*[-*+]\s+(.*)$/u;
 /**
  * Parse a note's Markdown into the {@link MarkdownDocument} block model.
  *
- * Pure and deterministic. Inline content of each block is kept as raw Markdown;
- * call {@link parseInline} to resolve it into formatted spans.
+ * Pure and deterministic. Splits optional leading YAML {@link Frontmatter} off
+ * the front (see {@link parseFrontmatter}) and parses the remaining body into
+ * blocks. Inline content of each block is kept as raw Markdown; call
+ * {@link parseInline} to resolve it into formatted spans.
  */
 export function parseMarkdown(markdown: string): MarkdownDocument {
+  const { frontmatter, body } = parseFrontmatter(markdown);
+  const blocks = parseBlocks(body);
+  return frontmatter ? { blocks, frontmatter } : { blocks };
+}
+
+/** Parse a frontmatter-free Markdown body into its ordered top-level blocks. */
+function parseBlocks(markdown: string): MarkdownBlock[] {
   const lines = markdown.replace(/\r\n?/gu, "\n").split("\n");
   const blocks: MarkdownBlock[] = [];
 
@@ -151,7 +197,137 @@ export function parseMarkdown(markdown: string): MarkdownDocument {
   }
 
   flush();
-  return { blocks };
+  return blocks;
+}
+
+/**
+ * Split a note's raw bytes into optional leading {@link Frontmatter} and the
+ * Markdown body that follows it.
+ *
+ * Recognizes a YAML frontmatter block only when the very first line is exactly
+ * `---` and a later line is exactly `---` (the closing fence); everything
+ * between is parsed as the supported YAML subset and everything after is the
+ * body. With no opening/closing fence the whole input is the body and no
+ * frontmatter is returned. An empty metadata block (`---\n---`) yields no
+ * frontmatter either, so it canonicalizes away. Pure and deterministic.
+ */
+export function parseFrontmatter(markdown: string): ParsedFrontmatter {
+  const normalized = markdown.replace(/\r\n?/gu, "\n");
+  const lines = normalized.split("\n");
+  if (lines[0] !== "---") return { body: normalized };
+
+  let close = -1;
+  for (let i = 1; i < lines.length; i += 1) {
+    if (lines[i] === "---") {
+      close = i;
+      break;
+    }
+  }
+  if (close === -1) return { body: normalized };
+
+  const frontmatter = parseFrontmatterBody(lines.slice(1, close));
+  // Strip the single blank line conventionally separating metadata from prose.
+  const body = lines.slice(close + 1).join("\n").replace(/^\n+/u, "");
+  return isFrontmatterEmpty(frontmatter) ? { body } : { frontmatter, body };
+}
+
+/** Matches a `key: value` scalar line; group 1 is the key, group 2 the value. */
+const FRONTMATTER_ENTRY = /^([A-Za-z0-9_-]+):\s*(.*)$/u;
+/** Matches a `  - item` block-sequence entry under a `tags:` key. */
+const SEQUENCE_ITEM = /^\s*-\s+(.*)$/u;
+
+/** Parse the inner lines of a frontmatter block into a {@link Frontmatter}. */
+function parseFrontmatterBody(lines: string[]): Frontmatter {
+  const frontmatter: Frontmatter = { tags: [] };
+  const extra: Record<string, string> = {};
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    // Skip blank lines and full-line `#` comments.
+    if (line.trim() === "" || line.trimStart().startsWith("#")) continue;
+
+    const entry = FRONTMATTER_ENTRY.exec(line);
+    if (!entry) continue;
+    const key = entry[1];
+    const value = entry[2].trim();
+
+    if (key === "tags") {
+      if (value === "") {
+        // Block sequence: consume the following `- item` lines.
+        const items: string[] = [];
+        while (i + 1 < lines.length && SEQUENCE_ITEM.test(lines[i + 1])) {
+          i += 1;
+          items.push(unquote((SEQUENCE_ITEM.exec(lines[i]) as RegExpExecArray)[1].trim()));
+        }
+        frontmatter.tags = items.filter((tag) => tag.length > 0);
+      } else {
+        frontmatter.tags = parseFlowSequence(value);
+      }
+    } else if (key === "title") {
+      frontmatter.title = unquote(value);
+    } else if (key === "created") {
+      frontmatter.created = unquote(value);
+    } else if (key === "updated") {
+      frontmatter.updated = unquote(value);
+    } else {
+      extra[key] = unquote(value);
+    }
+  }
+
+  if (Object.keys(extra).length > 0) frontmatter.extra = extra;
+  return frontmatter;
+}
+
+/**
+ * Parse a flow sequence `[a, b]` (or a bare `a, b` list) into trimmed items.
+ *
+ * Quote-aware: a quoted item may contain commas (`["a, b", c]`), and the
+ * surrounding quotes are stripped. Empty items are dropped.
+ */
+function parseFlowSequence(value: string): string[] {
+  const inner = value.replace(/^\[/u, "").replace(/\]$/u, "");
+  const items: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | null = null;
+
+  for (const ch of inner) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      else current += ch;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === ",") {
+      items.push(current.trim());
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  items.push(current.trim());
+  return items.filter((item) => item.length > 0);
+}
+
+/** Strip a single layer of matching single/double quotes, if present. */
+function unquote(value: string): string {
+  if (value.length >= 2) {
+    const first = value[0];
+    const last = value[value.length - 1];
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      return value.slice(1, -1);
+    }
+  }
+  return value;
+}
+
+/** Whether a frontmatter block carries no metadata worth serializing. */
+function isFrontmatterEmpty(frontmatter: Frontmatter): boolean {
+  return (
+    frontmatter.title === undefined &&
+    frontmatter.created === undefined &&
+    frontmatter.updated === undefined &&
+    frontmatter.tags.length === 0 &&
+    frontmatter.extra === undefined
+  );
 }
 
 // A `[[wikilink]]` is matched first and atomically, so its inner text is never
@@ -286,13 +462,76 @@ function serializeBlock(block: MarkdownBlock): string {
  * (`serialize(parse(serialize(x))) === serialize(x)`). Inline content is emitted
  * verbatim, so callers should pass the block model produced by
  * {@link parseMarkdown} (whose block text is already single-line and normalized).
+ *
+ * When the document carries non-empty {@link Frontmatter}, a canonical `---`
+ * YAML block is emitted first (one blank line separating it from the body), so
+ * structured metadata round-trips through the same canonicalization.
  */
 export function serializeMarkdown(
   input: MarkdownDocument | MarkdownBlock[],
 ): string {
   const blocks = Array.isArray(input) ? input : input.blocks;
+  const frontmatter = Array.isArray(input) ? undefined : input.frontmatter;
   const body = blocks.map(serializeBlock).join("\n\n").trim();
-  return body.length > 0 ? `${body}\n` : "";
+  const fence =
+    frontmatter && !isFrontmatterEmpty(frontmatter)
+      ? serializeFrontmatter(frontmatter)
+      : "";
+
+  if (fence === "") return body.length > 0 ? `${body}\n` : "";
+  return body.length > 0 ? `${fence}\n${body}\n` : fence;
+}
+
+/** Serialize {@link Frontmatter} to a canonical `---`-fenced YAML block. */
+function serializeFrontmatter(frontmatter: Frontmatter): string {
+  const lines = ["---"];
+  if (frontmatter.title !== undefined) {
+    lines.push(`title: ${quoteScalar(frontmatter.title)}`);
+  }
+  if (frontmatter.created !== undefined) {
+    lines.push(`created: ${quoteScalar(frontmatter.created)}`);
+  }
+  if (frontmatter.updated !== undefined) {
+    lines.push(`updated: ${quoteScalar(frontmatter.updated)}`);
+  }
+  if (frontmatter.extra) {
+    for (const key of Object.keys(frontmatter.extra).sort()) {
+      lines.push(`${key}: ${quoteScalar(frontmatter.extra[key])}`);
+    }
+  }
+  if (frontmatter.tags.length > 0) {
+    lines.push(`tags: [${frontmatter.tags.map(quoteTag).join(", ")}]`);
+  }
+  lines.push("---");
+  return `${lines.join("\n")}\n`;
+}
+
+/** Characters that, leading a scalar, force quoting to stay unambiguous YAML. */
+const SPECIAL_LEADING = /^[\s#\-?:,[\]{}&*!|>%@`"']/u;
+
+/** Whether a scalar value must be quoted to survive a parse round-trip. */
+function needsQuoting(value: string): boolean {
+  return (
+    value === "" ||
+    value !== value.trim() ||
+    SPECIAL_LEADING.test(value) ||
+    value.includes(": ") ||
+    value.includes(" #")
+  );
+}
+
+/** Quote a scalar when needed, preferring double quotes (single if it has `"`). */
+function quoteScalar(value: string): string {
+  if (!needsQuoting(value)) return value;
+  return value.includes('"') ? `'${value}'` : `"${value}"`;
+}
+
+/** Quote a tag when it contains list punctuation or other ambiguous characters. */
+function quoteTag(tag: string): string {
+  if (needsQuoting(tag) || /[,[\]]/u.test(tag)) {
+    return tag.includes('"') ? `'${tag}'` : `"${tag}"`;
+  }
+  return tag;
 }
 
 /**

@@ -81,6 +81,42 @@ describe("tipTapDocToMarkdown round-trip", () => {
   });
 });
 
+describe("image bridge", () => {
+  it("maps a standalone image paragraph to an image node with a hosted src", () => {
+    const doc = markdownToTipTapDoc("![Logo](assets/logo.png)\n");
+    // The stored repo-relative path becomes the server's hosted URL for display.
+    expect(doc.content).toEqual([
+      { type: "image", attrs: { src: "/assets/logo.png", alt: "Logo" } },
+    ]);
+  });
+
+  it("serializes an image node back to its repo-relative Markdown", () => {
+    const doc: JSONContent = {
+      type: "doc",
+      content: [{ type: "image", attrs: { src: "/assets/logo.png", alt: "Logo" } }],
+    };
+    expect(tipTapDocToMarkdown(doc)).toBe("![Logo](assets/logo.png)\n");
+  });
+
+  it("round-trips a note with an embedded image", () => {
+    const markdown = "# Title\n\n![Diagram](assets/diagram.png)\n";
+    expect(tipTapDocToMarkdown(markdownToTipTapDoc(markdown))).toBe(markdown);
+  });
+
+  it("leaves an external image URL untranslated", () => {
+    const doc = markdownToTipTapDoc("![x](https://example.com/x.png)\n");
+    expect(doc.content).toEqual([
+      { type: "image", attrs: { src: "https://example.com/x.png", alt: "x" } },
+    ]);
+    expect(tipTapDocToMarkdown(doc)).toBe("![x](https://example.com/x.png)\n");
+  });
+
+  it("treats text mixed with an image as ordinary prose, not an image node", () => {
+    const doc = markdownToTipTapDoc("see ![x](assets/x.png) here\n");
+    expect(doc.content?.[0]?.type).toBe("paragraph");
+  });
+});
+
 describe("wikiLinkQuery", () => {
   it("returns the text typed after the nearest unclosed [[", () => {
     expect(wikiLinkQuery("see [[Pro")).toBe("Pro");

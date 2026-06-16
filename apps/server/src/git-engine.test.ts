@@ -1,10 +1,18 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createNote, moveNote, readNote, readNoteTree, renameNote, writeNote } from "@stout/core";
+import {
+  createNote,
+  moveNote,
+  readNote,
+  readNoteTree,
+  renameNote,
+  writeAttachment,
+  writeNote,
+} from "@stout/core";
 import {
   ensureWorkspaceRepo,
   loadRepoPaths,
@@ -107,6 +115,38 @@ describe("NodeGitEngine + readNoteTree", () => {
       {
         path: "projects/ideas",
         title: "Ideas",
+        file: "projects/ideas.md",
+        kind: "leaf",
+        children: [],
+      },
+    ]);
+  });
+
+  it("overrides a note's derived title with its frontmatter title", async () => {
+    await ensureWorkspaceRepo(paths);
+    await commitNote(
+      paths.cloneDir,
+      "projects/_index.md",
+      "---\ntitle: My Projects\n---\n\n# Projects\n",
+    );
+    await commitNote(
+      paths.cloneDir,
+      "projects/ideas.md",
+      "---\ntitle: Bright Ideas\n---\n\n# Ideas\n",
+    );
+
+    const engine = new NodeGitEngine(paths.cloneDir);
+    const { root } = await readNoteTree(engine);
+
+    const projects = root.children.find((c) => c.path === "projects");
+    expect(projects).toMatchObject({
+      title: "My Projects",
+      file: "projects/_index.md",
+    });
+    expect(projects?.children).toEqual([
+      {
+        path: "projects/ideas",
+        title: "Bright Ideas",
         file: "projects/ideas.md",
         kind: "leaf",
         children: [],
@@ -521,6 +561,59 @@ describe("NodeGitEngine note mutations (create / rename / move)", () => {
       "main",
     ]);
     expect(stdout.split("\n")).not.toContain("solo.md");
+  });
+});
+
+describe("NodeGitEngine.writeAttachmentFile + writeAttachment", () => {
+  /** Commit subjects on a ref, newest first. */
+  async function subjects(dir: string, ref: string): Promise<string[]> {
+    const { stdout } = await run("git", ["-C", dir, "log", "--format=%s", ref]);
+    return stdout.split("\n").filter((line) => line.length > 0);
+  }
+
+  it("stores bytes under assets/, commits to main, and returns the path", async () => {
+    await ensureWorkspaceRepo(paths);
+    const engine = new NodeGitEngine(paths.cloneDir);
+    const before = (await subjects(paths.cloneDir, "main")).length;
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+
+    const res = await writeAttachment(engine, "My Diagram.PNG", bytes);
+
+    expect(res).toEqual({ path: "assets/my-diagram.png" });
+    // The bytes landed verbatim in the working clone.
+    const stored = await readFile(join(paths.cloneDir, "assets/my-diagram.png"));
+    expect(new Uint8Array(stored)).toEqual(bytes);
+    // It is tracked and committed on main with a descriptive subject.
+    const mainSubjects = await subjects(paths.cloneDir, "main");
+    expect(mainSubjects.length).toBe(before + 1);
+    expect(mainSubjects[0]).toBe("Add attachment assets/my-diagram.png");
+  });
+
+  it("appends a unique suffix instead of clobbering an existing attachment", async () => {
+    await ensureWorkspaceRepo(paths);
+    const engine = new NodeGitEngine(paths.cloneDir);
+
+    const first = await writeAttachment(engine, "logo.png", new Uint8Array([1]));
+    const second = await writeAttachment(engine, "logo.png", new Uint8Array([2]));
+
+    expect(first.path).toBe("assets/logo.png");
+    expect(second.path).toBe("assets/logo-1.png");
+    // Both files coexist, each with its own bytes.
+    expect(new Uint8Array(await readFile(join(paths.cloneDir, first.path)))).toEqual(
+      new Uint8Array([1]),
+    );
+    expect(new Uint8Array(await readFile(join(paths.cloneDir, second.path)))).toEqual(
+      new Uint8Array([2]),
+    );
+  });
+
+  it("refuses to write outside the working clone", async () => {
+    await ensureWorkspaceRepo(paths);
+    const engine = new NodeGitEngine(paths.cloneDir);
+
+    await expect(
+      engine.writeAttachmentFile("../escape.png", new Uint8Array([0]), "nope"),
+    ).rejects.toThrow(/outside the working clone/u);
   });
 });
 

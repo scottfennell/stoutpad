@@ -38,6 +38,19 @@ describe("TipTapEditor", () => {
     expect(checkboxes[0].checked).toBe(true);
     expect(checkboxes[1].checked).toBe(false);
   });
+
+  it("renders an embedded attachment as a live <img> at its hosted URL", async () => {
+    render(<TipTapEditor markdown={"![Diagram](assets/diagram.png)\n"} />);
+
+    const img = await waitFor(() => {
+      const found = document.querySelector("img");
+      expect(found).toBeTruthy();
+      return found!;
+    });
+    // The stored repo-relative path is served from the hosted `/assets` mount.
+    expect(img.getAttribute("src")).toBe("/assets/diagram.png");
+    expect(img.getAttribute("alt")).toBe("Diagram");
+  });
 });
 
 /** A wikilink context where only "Home" resolves; everything else is broken. */

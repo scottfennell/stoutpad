@@ -2,12 +2,14 @@ import type pg from "pg";
 import type { HealthStatus } from "@stout/core";
 import {
   applyNoteSync,
+  ASSETS_DIR,
   createNote,
   moveNote,
   readLinkGraph,
   readNote,
   readNoteTree,
   renameNote,
+  writeAttachment,
   writeNote,
 } from "@stout/core";
 import { createApp, resolveUiDir } from "./app.js";
@@ -23,6 +25,7 @@ import {
 } from "./git-engine.js";
 import { runMigrations } from "./migrate.js";
 import { migrations } from "./migrations.js";
+import { join } from "node:path";
 
 async function main(): Promise<void> {
   const config = loadDbConfig();
@@ -66,6 +69,9 @@ async function main(): Promise<void> {
     createNote: (parent, name) => createNote(gitEngine, parent, name),
     renameNote: (path, name) => renameNote(gitEngine, path, name),
     moveNote: (path, parent) => moveNote(gitEngine, path, parent),
+    saveAttachment: (name, dataBase64) =>
+      writeAttachment(gitEngine, name, Buffer.from(dataBase64, "base64")),
+    assetsDir: join(repoPaths.cloneDir, ASSETS_DIR),
     uiDir: resolveUiDir(),
   });
   app.listen(port, () => {

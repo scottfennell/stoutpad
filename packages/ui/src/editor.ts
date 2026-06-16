@@ -11,10 +11,14 @@
  * TipTap/ProseMirror's document JSON. The Markdown grammar is parsed by the pure
  * `core/markdown`; here we only map its {@link MarkdownDocument} model to/from the
  * editor's node tree, so the editor stays a thin rendering shell over the seam.
+ * Standalone `![alt](assets/x.png)` image paragraphs are mapped to live `image`
+ * nodes (rewriting the repo-relative path to the server's hosted `/assets/x.png`
+ * URL and back), so embedded attachments render in place.
  */
 
 import type { JSONContent } from "@tiptap/core";
 import {
+  ASSETS_DIR,
   parseInline,
   parseMarkdown,
   parseWikiLink,
@@ -89,6 +93,35 @@ function paragraphNode(text: string): JSONContent {
   return withContent({ type: "paragraph" }, inlineToNodes(text));
 }
 
+/** A whole-line embedded image: `![alt](src)` and nothing else. */
+const IMAGE_PARAGRAPH = /^!\[([^\]]*)\]\(([^)]+)\)$/u;
+
+/**
+ * Translate a stored attachment `src` (repo-relative `assets/x.png`) into the
+ * browser-loadable URL the server hosts it at (`/assets/x.png`). External or
+ * already-absolute URLs pass through untouched.
+ */
+function toDisplaySrc(src: string): string {
+  return src.startsWith(`${ASSETS_DIR}/`) ? `/${src}` : src;
+}
+
+/** Inverse of {@link toDisplaySrc}: a hosted `/assets/...` URL → its repo-relative path. */
+function toStorageSrc(src: string): string {
+  return src.startsWith(`/${ASSETS_DIR}/`) ? src.slice(1) : src;
+}
+
+/**
+ * Map a standalone `![alt](src)` paragraph to a TipTap `image` node (so it
+ * renders live), translating the stored path to a hosted URL — or `null` when the
+ * paragraph is ordinary prose. Only image-only paragraphs become image nodes;
+ * an image mixed into a line of text stays literal Markdown.
+ */
+function imageNode(text: string): JSONContent | null {
+  const match = text.match(IMAGE_PARAGRAPH);
+  if (!match) return null;
+  return { type: "image", attrs: { src: toDisplaySrc(match[2]), alt: match[1] } };
+}
+
 function blockToNode(block: MarkdownBlock): JSONContent {
   switch (block.type) {
     case "heading":
@@ -97,7 +130,7 @@ function blockToNode(block: MarkdownBlock): JSONContent {
         inlineToNodes(block.text),
       );
     case "paragraph":
-      return paragraphNode(block.text);
+      return imageNode(block.text) ?? paragraphNode(block.text);
     case "bulletList":
       return {
         type: "bulletList",
@@ -168,6 +201,11 @@ function nodeToMarkdown(node: JSONContent): string | null {
             `- [${item.attrs?.checked ? "x" : " "}] ${firstParagraphText(item)}`,
         )
         .join("\n");
+    case "image": {
+      const src = typeof node.attrs?.src === "string" ? node.attrs.src : "";
+      const alt = typeof node.attrs?.alt === "string" ? node.attrs.alt : "";
+      return `![${alt}](${toStorageSrc(src)})`;
+    }
     default:
       return null;
   }

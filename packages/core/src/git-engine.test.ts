@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   readLinkGraph,
   readNote,
+  readNoteTree,
   writeNote,
   type NoteFile,
+  type NoteNode,
   type WritableGitEngine,
 } from "./index.js";
 
@@ -114,6 +116,34 @@ describe("writeNote", () => {
     await writeNote(engine, "notes", "# Changed\n");
     await writeNote(engine, "notes", "# Changed\n");
     expect(engine.commits).toHaveLength(1);
+  });
+});
+
+describe("readNoteTree", () => {
+  /** Find a descendant node by its tree path. */
+  const find = (node: NoteNode, path: string): NoteNode | undefined => {
+    if (node.path === path) return node;
+    for (const child of node.children) {
+      const hit = find(child, path);
+      if (hit) return hit;
+    }
+    return undefined;
+  };
+
+  it("overrides derived titles with each note's frontmatter title", async () => {
+    const engine = new InMemoryGitEngine({
+      "_index.md": "---\ntitle: My Brain\n---\n\n# Home\n",
+      "first_draft.md": "---\ntitle: Grand Plans\ntags: [todo]\n---\n\nbody\n",
+      "plain.md": "# Plain\n",
+    });
+
+    const { root } = await readNoteTree(engine);
+
+    // Root and leaf titles come from frontmatter...
+    expect(root.title).toBe("My Brain");
+    expect(find(root, "first_draft")!.title).toBe("Grand Plans");
+    // ...while a note without frontmatter keeps its file-derived title.
+    expect(find(root, "plain")!.title).toBe("Plain");
   });
 });
 

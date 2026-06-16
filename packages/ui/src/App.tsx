@@ -2,11 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   buildTitleIndex,
   DEFAULT_DEBOUNCE_MS,
+  deriveTitle,
   HEALTH_PATH,
   NOTE_PATH,
   NoteSync,
+  parseMarkdown,
   resolveTitle,
+  serializeMarkdown,
   TREE_PATH,
+  type Frontmatter,
   type HealthStatus,
   type NoteContentResponse,
   type NoteNode,
@@ -14,6 +18,7 @@ import {
 } from "@stout/core";
 import { TipTapEditor } from "./TipTapEditor.js";
 import { createHttpWipEngine } from "./sync-client.js";
+import { postAttachment } from "./attachment-client.js";
 import { postNoteCreate, postNoteMove, postNoteRename } from "./mutation-client.js";
 import type { EditorComponent, WikiLinkContext } from "./editor.js";
 
@@ -406,14 +411,6 @@ function NotePanel({
   wikiLinks?: WikiLinkContext;
 }) {
   const result = useNote(selectedPath);
-  const ready = result.state === "ready";
-  // Drive the autosave/squash session off the loaded note. Keyed on the note's
-  // identity + its initial Markdown so switching notes ends the prior session.
-  const onChange = useNoteSync(
-    ready ? result.note.path : null,
-    ready ? result.note.markdown : "",
-    { debounceMs },
-  );
 
   return (
     <section aria-label="Note" style={{ marginBottom: "2rem" }}>
@@ -425,15 +422,228 @@ function NotePanel({
         <p role="alert">Could not load note: {result.message}</p>
       )}
       {result.state === "ready" && (
-        <article data-testid="note-content" data-note-path={result.note.path}>
-          <Editor
-            markdown={result.note.markdown}
-            onChange={onChange}
-            wikiLinks={wikiLinks}
-          />
-        </article>
+        // Keyed on the note identity so switching notes remounts the editor with
+        // fresh draft state and ends the prior autosave session.
+        <LoadedNote
+          key={result.note.path}
+          note={result.note}
+          Editor={Editor}
+          debounceMs={debounceMs}
+          wikiLinks={wikiLinks}
+        />
       )}
     </section>
+  );
+}
+
+/** Split a note's full Markdown into its frontmatter and frontmatter-free body. */
+function splitFrontmatter(full: string): {
+  frontmatter?: Frontmatter;
+  body: string;
+} {
+  const doc = parseMarkdown(full);
+  return {
+    frontmatter: doc.frontmatter,
+    body: serializeMarkdown({ blocks: doc.blocks }),
+  };
+}
+
+/** Recombine the (unchanged) frontmatter with an edited body into full Markdown. */
+function recomposeNote(
+  frontmatter: Frontmatter | undefined,
+  body: string,
+): string {
+  return serializeMarkdown({ frontmatter, blocks: parseMarkdown(body).blocks });
+}
+
+/** The note's display title: its frontmatter `title`, else derived from its path. */
+function displayTitle(path: string, frontmatter?: Frontmatter): string {
+  if (frontmatter?.title) return frontmatter.title;
+  if (path === "") return "Home";
+  return deriveTitle(path.slice(path.lastIndexOf("/") + 1));
+}
+
+/** A file name without its extension, for an embedded image's alt text. */
+function altText(name: string): string {
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(0, dot) : name;
+}
+
+/** Append an embedded-image Markdown block referencing `storagePath` to `body`. */
+function appendImage(body: string, storagePath: string, name: string): string {
+  const image = `![${altText(name)}](${storagePath})`;
+  const trimmed = body.replace(/\n+$/u, "");
+  return trimmed.length > 0 ? `${trimmed}\n\n${image}\n` : `${image}\n`;
+}
+
+/** Read a File's bytes as a base64 string (the data-URL prefix stripped). */
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const data = reader.result;
+      if (typeof data !== "string") {
+        reject(new Error("could not read file"));
+        return;
+      }
+      const comma = data.indexOf(",");
+      resolve(comma >= 0 ? data.slice(comma + 1) : data);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("file read failed"));
+    reader.readAsDataURL(file);
+  });
+}
+
+/** The note's metadata header: its display title plus its tags rendered as chips. */
+function NoteHeader({ title, tags }: { title: string; tags: string[] }) {
+  return (
+    <header style={{ marginBottom: "1.25rem" }}>
+      <h1
+        data-testid="note-title-heading"
+        style={{ margin: "0 0 0.75rem", fontSize: "1.75rem", color: "#f2be8c" }}
+      >
+        {title}
+      </h1>
+      {tags.length > 0 && (
+        <div
+          data-testid="note-tags"
+          style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}
+        >
+          {tags.map((tag) => (
+            <span
+              key={tag}
+              data-testid="note-tag"
+              style={{
+                padding: "0.2rem 0.5rem",
+                borderRadius: "0.25rem",
+                fontSize: "0.75rem",
+                color: "#a6caff",
+                background: "rgba(113,175,255,0.1)",
+                border: "1px solid rgba(166,202,255,0.25)",
+              }}
+            >
+              #{tag}
+            </span>
+          ))}
+        </div>
+      )}
+    </header>
+  );
+}
+
+/** File-picker affordance that uploads an image attachment and reports errors. */
+function AttachmentUpload({
+  onUpload,
+  error,
+}: {
+  onUpload: (file: File) => void;
+  error: string | null;
+}) {
+  return (
+    <div style={{ marginBottom: "1rem" }}>
+      <label
+        style={{
+          display: "inline-block",
+          cursor: "pointer",
+          padding: "0.25rem 0.6rem",
+          borderRadius: "0.25rem",
+          border: "1px solid #50453b",
+          color: "#d4c4b7",
+          fontSize: "0.8rem",
+        }}
+      >
+        Attach image
+        <input
+          type="file"
+          accept="image/*"
+          data-testid="attachment-input"
+          style={{ display: "none" }}
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            event.target.value = "";
+            if (file) onUpload(file);
+          }}
+        />
+      </label>
+      {error !== null && (
+        <span role="alert" style={{ color: "#e6a3a3", marginLeft: "0.5rem" }}>
+          {error}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Render a loaded note: its frontmatter as a header (title + tag chips), an
+ * attachment uploader, and the editor over the frontmatter-free body. The body
+ * is held as local draft state so an uploaded image can be appended and shown
+ * live; every change recombines the frontmatter and drives the autosave session.
+ */
+function LoadedNote({
+  note,
+  Editor,
+  debounceMs,
+  wikiLinks,
+}: {
+  note: NoteContentResponse;
+  Editor: EditorComponent;
+  debounceMs?: number;
+  wikiLinks?: WikiLinkContext;
+}) {
+  const { frontmatter, body: initialBody } = useMemo(
+    () => splitFrontmatter(note.markdown),
+    [note.markdown],
+  );
+  const [body, setBody] = useState(initialBody);
+  const bodyRef = useRef(body);
+  bodyRef.current = body;
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  // Drive the autosave/squash session off the loaded note's full Markdown.
+  const onSync = useNoteSync(note.path, note.markdown, { debounceMs });
+  const emitChange = useCallback(
+    (nextBody: string) => onSync(recomposeNote(frontmatter, nextBody)),
+    [onSync, frontmatter],
+  );
+
+  const handleEditorChange = useCallback(
+    (nextBody: string) => {
+      setBody(nextBody);
+      emitChange(nextBody);
+    },
+    [emitChange],
+  );
+
+  const handleUpload = useCallback(
+    (file: File) => {
+      void (async () => {
+        try {
+          const dataBase64 = await fileToBase64(file);
+          const { path } = await postAttachment(file.name, dataBase64);
+          // Read the latest body off the ref: the upload is async, so the user
+          // may have edited since it started.
+          const next = appendImage(bodyRef.current, path, file.name);
+          setBody(next);
+          emitChange(next);
+          setUploadError(null);
+        } catch (err) {
+          setUploadError(err instanceof Error ? err.message : String(err));
+        }
+      })();
+    },
+    [emitChange],
+  );
+
+  return (
+    <article data-testid="note-content" data-note-path={note.path}>
+      <NoteHeader
+        title={displayTitle(note.path, frontmatter)}
+        tags={frontmatter?.tags ?? []}
+      />
+      <AttachmentUpload onUpload={handleUpload} error={uploadError} />
+      <Editor markdown={body} onChange={handleEditorChange} wikiLinks={wikiLinks} />
+    </article>
   );
 }
 

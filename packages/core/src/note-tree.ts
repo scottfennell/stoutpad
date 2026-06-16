@@ -32,6 +32,12 @@ export type NoteKind = "parent" | "leaf";
 export interface NoteFile {
   /** Repo-relative POSIX path, e.g. `_index.md`, `projects/_index.md`. */
   path: string;
+  /**
+   * Display title from the file's frontmatter `title:`, when it has one. Lets a
+   * note override the title derived from its file/folder name; absent means
+   * "derive the title from the name" (the default).
+   */
+  title?: string;
 }
 
 /** A node in the unified note tree. */
@@ -110,12 +116,12 @@ export function buildNoteTree(
 
   const seen = new Set<string>();
   const mdFiles = files
-    .map((f) => normalizePath(f.path))
-    .filter((p) => p.length > 0 && p.toLowerCase().endsWith(".md"))
+    .map((f) => ({ path: normalizePath(f.path), title: f.title }))
+    .filter((f) => f.path.length > 0 && f.path.toLowerCase().endsWith(".md"))
     // Sort so `_index.md` is processed before siblings and the result is stable.
-    .sort();
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
-  for (const path of mdFiles) {
+  for (const { path, title } of mdFiles) {
     if (seen.has(path)) continue;
     seen.add(path);
 
@@ -125,7 +131,10 @@ export function buildNoteTree(
 
     if (fileName.toLowerCase() === INDEX_FILE) {
       // Backs the directory note (the repo root for a top-level `_index.md`).
-      ensureDirNode(dirPath).file = path;
+      const node = ensureDirNode(dirPath);
+      node.file = path;
+      // A frontmatter `title:` overrides the folder-derived (or root) title.
+      if (title) node.title = title;
       continue;
     }
 
@@ -133,7 +142,8 @@ export function buildNoteTree(
     const stem = stripMarkdownExtension(fileName);
     parent.children.push({
       path: dirPath ? `${dirPath}/${stem}` : stem,
-      title: deriveTitle(fileName),
+      // A frontmatter `title:` overrides the file-name-derived title.
+      title: title ?? deriveTitle(fileName),
       file: path,
       kind: "leaf",
       children: [],

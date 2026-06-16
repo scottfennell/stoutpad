@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import express, { type Express, type Response } from "express";
 import {
+  ATTACHMENT_PATH,
   HEALTH_PATH,
   LINKS_PATH,
   NOTE_CREATE_PATH,
@@ -11,6 +12,8 @@ import {
   NoteMutationError,
   SYNC_PATH,
   TREE_PATH,
+  type AttachmentResponse,
+  type AttachmentUploadRequest,
   type HealthStatus,
   type LinkGraphResponse,
   type NoteContentResponse,
@@ -74,6 +77,17 @@ export interface AppDeps {
    * returning the note's new identity. Omit to skip the endpoint.
    */
   moveNote?: (path: string, parent: string) => Promise<NoteMutationResponse>;
+  /**
+   * Persist one uploaded attachment (`name` + base64 bytes) under `assets/`,
+   * returning the repo-relative path it was stored at. Injected so HTTP behavior
+   * is tested without a real repo. Omit to skip mounting the attachment endpoint.
+   */
+  saveAttachment?: (name: string, dataBase64: string) => Promise<AttachmentResponse>;
+  /**
+   * Absolute path to the repo's `assets/` folder, served read-only at `/assets`
+   * so embedded images resolve. Omit to skip hosting attachments.
+   */
+  assetsDir?: string;
   /** Absolute path to the built UI assets. Omit to skip static hosting. */
   uiDir?: string;
 }
@@ -284,6 +298,37 @@ export function createApp(deps: AppDeps): Express {
       }
       await respondMutation(res, () => moveNote(body.path as string, parent));
     });
+  }
+
+  if (deps.saveAttachment) {
+    const saveAttachment = deps.saveAttachment;
+    // `POST /api/attachment` stores one uploaded image/file under `assets/` and
+    // returns the repo-relative path to reference from the note's Markdown. Bytes
+    // arrive base64-encoded in JSON (no multipart), so the limit is generous.
+    app.post(ATTACHMENT_PATH, express.json({ limit: "25mb" }), async (req, res) => {
+      const body = (req.body ?? {}) as Partial<AttachmentUploadRequest>;
+      if (typeof body.name !== "string" || body.name.trim() === "") {
+        res.status(400).json({ error: "name (non-empty string) is required" });
+        return;
+      }
+      if (typeof body.dataBase64 !== "string" || body.dataBase64 === "") {
+        res.status(400).json({ error: "dataBase64 (non-empty string) is required" });
+        return;
+      }
+      try {
+        res.json(await saveAttachment(body.name, body.dataBase64));
+      } catch (err) {
+        res.status(500).json({
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+  }
+
+  if (deps.assetsDir) {
+    // Serve stored attachments read-only. Mounted before the SPA fallback so an
+    // `<img src="/assets/…">` resolves to the file rather than index.html.
+    app.use("/assets", express.static(deps.assetsDir));
   }
 
   if (deps.uiDir) {

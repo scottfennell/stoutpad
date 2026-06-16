@@ -6,10 +6,11 @@
  * (incl. the leaf↔parent transition), the git-engine read/write seam
  * (`GET /api/tree`, `GET`/`POST /api/note`, create/rename/move endpoints), the
  * pure `core/markdown` parser/serializer, the `core/sync` autosave +
- * wip-branch squash state machine (`POST /api/note/sync`), and the
- * `core/wikilink` title resolver + link graph (`GET /api/links`). Everything here
- * is runtime-agnostic — the Node/Git and editor (DOM) implementations live in
- * `apps/server` and `packages/ui`.
+ * wip-branch squash state machine (`POST /api/note/sync`), the
+ * `core/wikilink` title resolver + link graph (`GET /api/links`), and the
+ * `core/attachment` embedded-media contract (`POST /api/attachment`).
+ * Everything here is runtime-agnostic — the Node/Git and editor (DOM)
+ * implementations live in `apps/server` and `packages/ui`.
  */
 
 export * from "./note-tree.js";
@@ -19,6 +20,7 @@ export * from "./git-engine.js";
 export * from "./markdown.js";
 export * from "./sync.js";
 export * from "./wikilink.js";
+export * from "./attachment.js";
 
 /** Health status reported by the server's `/api/health` endpoint. */
 export interface HealthStatus {

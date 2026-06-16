@@ -26,6 +26,7 @@ import {
   canonicalizeMarkdown,
   resolveWriteTarget,
   wipBranchName,
+  type AttachmentGitEngine,
   type MutatingGitEngine,
   type NoteFile,
   type NoteMutation,
@@ -97,12 +98,13 @@ export async function ensureWorkspaceRepo(paths: RepoPaths): Promise<void> {
  * `main` on the first commit of a session), {@link squashMergeWipToMain} folds
  * the whole session onto `main` as one commit, and {@link deleteWip} removes the
  * branch. It also applies tree mutations (create / rename / move, including the
- * leaf↔parent transition) atomically via {@link applyNoteMutation}. Wip branches
- * are local-only — nothing here pushes, so they are never published. Every method
- * restores the clone to a clean `main` checkout, so the working tree the
- * read/commit-on-save paths see is always `main`.
+ * leaf↔parent transition) atomically via {@link applyNoteMutation}, and stores
+ * uploaded binary attachments under `assets/` via {@link writeAttachmentFile}.
+ * Wip branches are local-only — nothing here pushes, so they are never published.
+ * Every method restores the clone to a clean `main` checkout, so the working
+ * tree the read/commit-on-save paths see is always `main`.
  */
-export class NodeGitEngine implements WipGitEngine, MutatingGitEngine {
+export class NodeGitEngine implements WipGitEngine, MutatingGitEngine, AttachmentGitEngine {
   constructor(private readonly cloneDir: string) {}
 
   async listNoteFiles(): Promise<NoteFile[]> {
@@ -135,6 +137,52 @@ export class NodeGitEngine implements WipGitEngine, MutatingGitEngine {
     // empty commit (commit-on-save is idempotent at the git level too).
     if (await this.isClean(path)) return;
     await this.git(["commit", "-m", message, "--", path]);
+  }
+
+  /**
+   * Write one binary attachment near `desiredPath` (repo-relative POSIX, e.g.
+   * `assets/diagram.png`) and commit it to `main`, returning the **final** path
+   * actually used.
+   *
+   * Implements the {@link AttachmentGitEngine} seam: ensures the clone is on a
+   * clean `main`, resolves a unique name (appending `-1`, `-2`, … before the
+   * extension when the desired path is taken) so an upload never clobbers an
+   * existing attachment, writes the raw bytes, and commits. Path-escape-guarded
+   * like every other write.
+   */
+  async writeAttachmentFile(
+    desiredPath: string,
+    bytes: Uint8Array,
+    message: string,
+  ): Promise<string> {
+    await this.checkoutMain();
+    const path = await this.uniqueAttachmentPath(desiredPath);
+    const full = this.safePath(path);
+    await mkdir(dirname(full), { recursive: true });
+    await writeFile(full, bytes);
+    await this.git(["add", "--", path]);
+    await this.git(["commit", "-m", message, "--", path]);
+    return path;
+  }
+
+  /**
+   * Resolve a repo-relative attachment path that is not already taken on disk,
+   * appending a `-1`, `-2`, … suffix before the extension until one is free.
+   */
+  private async uniqueAttachmentPath(desiredPath: string): Promise<string> {
+    if (this.resolveInClone(desiredPath) === null) {
+      throw new Error(`refusing to write outside the working clone: ${desiredPath}`);
+    }
+    if (!(await exists(this.resolveInClone(desiredPath) as string))) return desiredPath;
+
+    const dot = desiredPath.lastIndexOf(".");
+    const stem = dot === -1 ? desiredPath : desiredPath.slice(0, dot);
+    const ext = dot === -1 ? "" : desiredPath.slice(dot);
+    for (let n = 1; ; n += 1) {
+      const candidate = `${stem}-${n}${ext}`;
+      const full = this.resolveInClone(candidate);
+      if (full !== null && !(await exists(full))) return candidate;
+    }
   }
 
   /**

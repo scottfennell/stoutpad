@@ -9,6 +9,7 @@ import {
 import { App } from "./App.js";
 import type { EditorComponent } from "./editor.js";
 import {
+  ATTACHMENT_PATH,
   HEALTH_PATH,
   NOTE_CREATE_PATH,
   NOTE_MOVE_PATH,
@@ -503,5 +504,119 @@ describe("App wikilinks", () => {
     );
     // ...without refetching the tree (resolution is client-side).
     expect(getCount(TREE_PATH)).toBe(1);
+  });
+});
+
+describe("App frontmatter & attachments", () => {
+  it("renders the note title and tags as a header from its frontmatter", async () => {
+    const note: NoteContentResponse = {
+      path: "notes",
+      file: "notes.md",
+      markdown:
+        "---\ntitle: My Great Note\ntags: [architecture, draft]\n---\n\n# Body\n\nText.\n",
+    };
+    stubApi({
+      [HEALTH_PATH]: health,
+      [TREE_PATH]: tree,
+      [`${NOTE_PATH}?path=notes`]: note,
+    });
+
+    render(<App Editor={FakeEditor} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+
+    // The frontmatter title heads the panel and the tags render as chips...
+    await waitFor(() =>
+      expect(screen.getByTestId("note-title-heading").textContent).toBe(
+        "My Great Note",
+      ),
+    );
+    expect(screen.getAllByTestId("note-tag").map((el) => el.textContent)).toEqual([
+      "#architecture",
+      "#draft",
+    ]);
+    // ...while the editor only ever sees the frontmatter-free Markdown body.
+    const editorText = screen.getByTestId("fake-editor").textContent ?? "";
+    expect(editorText).toContain("# Body");
+    expect(editorText).not.toContain("title:");
+    expect(editorText).not.toContain("---");
+  });
+
+  it("falls back to a derived title and shows no chips without frontmatter", async () => {
+    const note: NoteContentResponse = {
+      path: "notes",
+      file: "notes.md",
+      markdown: "# Notes\n",
+    };
+    stubApi({
+      [HEALTH_PATH]: health,
+      [TREE_PATH]: tree,
+      [`${NOTE_PATH}?path=notes`]: note,
+    });
+
+    render(<App Editor={FakeEditor} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("note-title-heading").textContent).toBe("Notes"),
+    );
+    expect(screen.queryByTestId("note-tags")).toBeNull();
+  });
+
+  it("uploads an image attachment and embeds it in the note body", async () => {
+    const note: NoteContentResponse = {
+      path: "notes",
+      file: "notes.md",
+      markdown: "# Notes\n",
+    };
+    stubApi({
+      [HEALTH_PATH]: health,
+      [TREE_PATH]: tree,
+      [`${NOTE_PATH}?path=notes`]: note,
+      [ATTACHMENT_PATH]: { path: "assets/diagram.png" },
+      [SYNC_PATH]: { path: "notes", action: "autosave", wipBranch: "wip/notes" },
+    });
+
+    render(<App Editor={FakeEditor} debounceMs={0} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+
+    const input = await screen.findByTestId("attachment-input");
+    const file = new File(["binary"], "Diagram.png", { type: "image/png" });
+    fireEvent.change(input, { target: { files: [file] } });
+
+    // The returned stored path is embedded as an image in the (frontmatter-free)
+    // body the editor renders.
+    await waitFor(() =>
+      expect(screen.getByTestId("fake-editor").textContent).toContain(
+        "![Diagram](assets/diagram.png)",
+      ),
+    );
+    // The upload posted the file name and its base64-encoded bytes.
+    const uploadBody = postBodies(ATTACHMENT_PATH)[0];
+    expect(uploadBody.name).toBe("Diagram.png");
+    expect(typeof uploadBody.dataBase64).toBe("string");
+  });
+
+  it("surfaces the server's error when an attachment upload is rejected", async () => {
+    const note: NoteContentResponse = {
+      path: "notes",
+      file: "notes.md",
+      markdown: "# Notes\n",
+    };
+    stubRoutes({
+      [HEALTH_PATH]: { body: health },
+      [TREE_PATH]: { body: tree },
+      [`${NOTE_PATH}?path=notes`]: { body: note },
+      [ATTACHMENT_PATH]: { status: 500, body: { error: "disk full" } },
+    });
+
+    render(<App Editor={FakeEditor} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+
+    const input = await screen.findByTestId("attachment-input");
+    fireEvent.change(input, {
+      target: { files: [new File(["x"], "x.png", { type: "image/png" })] },
+    });
+
+    expect(await screen.findByText("disk full")).toBeTruthy();
   });
 });

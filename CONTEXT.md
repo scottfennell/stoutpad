@@ -19,15 +19,17 @@ the tree (its repo path minus the `.md` extension and any trailing `_index`).
 ### Leaf note
 
 A note with no children, backed by a regular `name.md` file. Its **title**
-derives from the file name (`my-ideas.md` → "My Ideas").
+derives from the file name (`my-ideas.md` → "My Ideas"), unless its
+**frontmatter** sets a `title`, which overrides the derived one.
 
 ### Parent note
 
 A note that can contain children. It is a directory containing an `_index.md`;
 that directory may also hold child notes. A parent note still has its own content
 (in the `_index.md`) — "folders are first-class notes, not empty containers". Its
-**title** derives from the folder name. The repository root is itself a parent
-note, backed by the root `_index.md`.
+**title** derives from the folder name (or its `_index.md` **frontmatter**
+`title`, which overrides it). The repository root is itself a parent note, backed
+by the root `_index.md`.
 
 A **leaf↔parent transition** keeps a note's `path` identity stable as it gains or
 loses children. **Promotion**: giving a leaf its first child turns `Foo.md` into
@@ -73,6 +75,39 @@ CommonMark + GFM. "Canonical" is a strong promise: serialization is
 **deterministic** (same model → same bytes) and **idempotent** (re-parsing and
 re-serializing is byte-stable), so the same logical content always lands as the
 same file and edits produce small, meaningful git diffs.
+
+### Frontmatter
+
+The optional `---`-fenced YAML block at the top of a note's **canonical
+Markdown**, carrying structured metadata: a `title` (which overrides the note's
+file-name-derived **title**, display-only — it never changes the note's `path`
+identity or its wikilink title), a `tags` list (rendered as **chips** at the top
+of the note), `created` / `updated` dates (kept verbatim), and any other scalar
+fields (preserved so they round-trip). Parsed by `core/markdown` as a
+deliberately tiny YAML subset (no nested maps/anchors, so `@stout/core` stays
+dependency-free) into an optional `frontmatter` on the parsed document; a note
+with no frontmatter keeps the bare block shape it had before, and the canonical
+serializer emits a fixed-order block only when frontmatter is present — so
+**Canonical Markdown**'s round-trip and idempotence promises extend to metadata.
+The editor never sees frontmatter: the center panel splits it off, renders it as
+a header (title + tag chips), and recombines it with the edited body on save.
+
+### Attachment
+
+An embedded binary file (e.g. an image) stored as a real file in the repo — under
+a conventional `assets/` folder — and referenced from a note's **canonical
+Markdown** by its repo-relative path (`![alt](assets/diagram.png)`), so notes
+stay self-contained and portable. Uploaded via `POST /api/attachment`
+(`ATTACHMENT_PATH`) as a plain JSON body with the bytes base64-encoded (no
+multipart); the server decodes, writes, and commits the file to `main` via the
+**git engine**, resolving any name collision with a unique suffix and returning
+the **final** stored path. The pure pieces — the contract, the `name → safe slug`
+function, and the `writeAttachment` composition over the narrow
+`AttachmentGitEngine` seam — live in `core/attachment`, mirroring how
+**commit-on-save**'s `writeNote` sits over `WritableGitEngine`. Stored
+attachments are served statically from `/assets`, and the editor renders a
+standalone `![alt](assets/…)` image paragraph as a live image (translating the
+stored path to the hosted `/assets/…` URL and back).
 
 ### Commit-on-save
 

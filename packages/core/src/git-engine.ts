@@ -19,7 +19,7 @@ import {
   normalizeNotePath,
   type NoteContentResponse,
 } from "./note-content.js";
-import { canonicalizeMarkdown } from "./markdown.js";
+import { canonicalizeMarkdown, parseFrontmatter } from "./markdown.js";
 import {
   buildLinkGraph,
   buildTitleIndex,
@@ -63,13 +63,26 @@ export interface WritableGitEngine extends GitEngine {
  * Read the working clone via the injected {@link GitEngine} and map it into the
  * unified note tree. The Node/Git side stays in the engine; the mapping stays
  * pure.
+ *
+ * Each note file is read so a frontmatter `title:` can override the title
+ * derived from its file/folder name (the `title` is parsed purely by
+ * {@link parseFrontmatter}). Files are read concurrently and a missing read
+ * simply leaves the derived title in place.
  */
 export async function readNoteTree(
   engine: GitEngine,
   options?: { rootTitle?: string },
 ): Promise<NoteTreeResponse> {
   const files = await engine.listNoteFiles();
-  return { root: buildNoteTree(files, options) };
+  const withTitles = await Promise.all(
+    files.map(async (file): Promise<NoteFile> => {
+      const markdown = await engine.readNoteFile(file.path);
+      const title =
+        markdown === null ? undefined : parseFrontmatter(markdown).frontmatter?.title;
+      return { ...file, title };
+    }),
+  );
+  return { root: buildNoteTree(withTitles, options) };
 }
 
 /**

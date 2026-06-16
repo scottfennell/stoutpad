@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  canonicalizeMarkdown,
   extractWikiLinks,
+  parseFrontmatter,
   parseInline,
   parseMarkdown,
   parseWikiLink,
@@ -210,5 +212,132 @@ describe("serializeMarkdown", () => {
       // parse(serialize(x)) round-trips: re-parsing canonical text is stable.
       expect(parseMarkdown(twice)).toEqual(parseMarkdown(once));
     }
+  });
+});
+
+/** A note opening with a representative frontmatter block. */
+const WITH_FRONTMATTER = `---
+title: Trip Planning
+created: 2024-01-02
+updated: 2024-03-04
+tags: [travel, todo]
+---
+
+# Trip Planning
+
+- [ ] Book flights
+`;
+
+describe("parseFrontmatter", () => {
+  it("splits a frontmatter block from the body", () => {
+    const { frontmatter, body } = parseFrontmatter(WITH_FRONTMATTER);
+    expect(frontmatter).toEqual({
+      title: "Trip Planning",
+      created: "2024-01-02",
+      updated: "2024-03-04",
+      tags: ["travel", "todo"],
+    });
+    expect(body).toBe("# Trip Planning\n\n- [ ] Book flights\n");
+  });
+
+  it("parses a block-sequence `- item` tag list", () => {
+    const { frontmatter } = parseFrontmatter(
+      "---\ntags:\n  - travel\n  - todo\n---\nbody\n",
+    );
+    expect(frontmatter?.tags).toEqual(["travel", "todo"]);
+  });
+
+  it("collects unknown scalar keys into `extra`", () => {
+    const { frontmatter } = parseFrontmatter(
+      "---\ntitle: A\nauthor: Sam\nstatus: draft\n---\n",
+    );
+    expect(frontmatter).toEqual({
+      title: "A",
+      tags: [],
+      extra: { author: "Sam", status: "draft" },
+    });
+  });
+
+  it("strips surrounding quotes from values", () => {
+    const { frontmatter } = parseFrontmatter(
+      `---\ntitle: "Hello: World"\ntags: ['a, b', c]\n---\n`,
+    );
+    expect(frontmatter?.title).toBe("Hello: World");
+    expect(frontmatter?.tags).toEqual(["a, b", "c"]);
+  });
+
+  it("ignores blank lines and `#` comments inside the block", () => {
+    const { frontmatter } = parseFrontmatter(
+      "---\n# a comment\ntitle: A\n\ntags: [x]\n---\n",
+    );
+    expect(frontmatter).toEqual({ title: "A", tags: ["x"] });
+  });
+
+  it("returns no frontmatter when the note does not open with `---`", () => {
+    expect(parseFrontmatter("# Heading\n")).toEqual({ body: "# Heading\n" });
+  });
+
+  it("returns no frontmatter when the fence is never closed", () => {
+    const input = "---\ntitle: A\n# Heading\n";
+    expect(parseFrontmatter(input)).toEqual({ body: input });
+  });
+
+  it("treats an empty metadata block as no frontmatter", () => {
+    expect(parseFrontmatter("---\n---\nbody\n")).toEqual({ body: "body\n" });
+  });
+});
+
+describe("frontmatter canonicalization", () => {
+  it("attaches parsed frontmatter to the document", () => {
+    const doc = parseMarkdown(WITH_FRONTMATTER);
+    expect(doc.frontmatter).toEqual({
+      title: "Trip Planning",
+      created: "2024-01-02",
+      updated: "2024-03-04",
+      tags: ["travel", "todo"],
+    });
+    expect(doc.blocks).toEqual([
+      { type: "heading", level: 1, text: "Trip Planning" },
+      { type: "taskList", items: [{ checked: false, text: "Book flights" }] },
+    ]);
+  });
+
+  it("round-trips a frontmatter note byte-for-byte", () => {
+    expect(canonicalizeMarkdown(WITH_FRONTMATTER)).toBe(WITH_FRONTMATTER);
+  });
+
+  it("normalizes a block-sequence tag list to canonical flow form", () => {
+    const loose = "---\ntitle: A\ntags:\n  - one\n  - two\n---\n\nbody\n";
+    expect(canonicalizeMarkdown(loose)).toBe(
+      "---\ntitle: A\ntags: [one, two]\n---\n\nbody\n",
+    );
+  });
+
+  it("emits a frontmatter-only note with no trailing body", () => {
+    expect(canonicalizeMarkdown("---\ntitle: A\n---\n")).toBe(
+      "---\ntitle: A\n---\n",
+    );
+  });
+
+  it("quotes values that would otherwise be ambiguous", () => {
+    const doc: MarkdownDocument = {
+      frontmatter: { title: "Plans: Q1", tags: ["a, b", "c"] },
+      blocks: [{ type: "paragraph", text: "hi" }],
+    };
+    const serialized = serializeMarkdown(doc);
+    expect(serialized).toBe('---\ntitle: "Plans: Q1"\ntags: ["a, b", c]\n---\n\nhi\n');
+    // ...and it round-trips back to the same frontmatter.
+    expect(parseMarkdown(serialized).frontmatter).toEqual(doc.frontmatter);
+  });
+
+  it("is idempotent on frontmatter notes", () => {
+    const once = canonicalizeMarkdown(WITH_FRONTMATTER);
+    const twice = canonicalizeMarkdown(once);
+    expect(twice).toBe(once);
+  });
+
+  it("preserves unknown frontmatter keys through a round-trip", () => {
+    const input = "---\ntitle: A\nauthor: Sam\n---\n\nbody\n";
+    expect(canonicalizeMarkdown(input)).toBe(input);
   });
 });
