@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  buildTitleIndex,
   DEFAULT_DEBOUNCE_MS,
   HEALTH_PATH,
   NOTE_PATH,
   NoteSync,
+  resolveTitle,
   TREE_PATH,
   type HealthStatus,
   type NoteContentResponse,
@@ -13,7 +15,7 @@ import {
 import { TipTapEditor } from "./TipTapEditor.js";
 import { createHttpWipEngine } from "./sync-client.js";
 import { postNoteCreate, postNoteMove, postNoteRename } from "./mutation-client.js";
-import type { EditorComponent } from "./editor.js";
+import type { EditorComponent, WikiLinkContext } from "./editor.js";
 
 type Fetched =
   | { state: "loading" }
@@ -310,16 +312,17 @@ function NoteTreeItem({
 }
 
 function NavPanel({
+  treeResult,
   selectedPath,
   onSelect,
+  onReload,
 }: {
+  treeResult: TreeFetched;
   selectedPath: string | null;
   onSelect: (path: string) => void;
+  onReload: () => void;
 }) {
-  // Bumping the token refetches the tree after a mutation reshapes it.
-  const [reloadToken, setReloadToken] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const result = useTree(fetch, reloadToken);
 
   const handleMutate = useCallback(
     (kind: TreeMutation, node: NoteNode) => {
@@ -345,13 +348,13 @@ function NavPanel({
       const select = (res: { path: string }): void => {
         setError(null);
         onSelect(res.path);
-        setReloadToken((token) => token + 1);
+        onReload();
       };
       run().catch((err: unknown) => {
         setError(err instanceof Error ? err.message : String(err));
       });
     },
-    [onSelect],
+    [onSelect, onReload],
   );
 
   return (
@@ -373,14 +376,14 @@ function NavPanel({
           {error}
         </p>
       )}
-      {result.state === "loading" && <p>Loading notes…</p>}
-      {result.state === "error" && (
-        <p role="alert">Could not load notes: {result.message}</p>
+      {treeResult.state === "loading" && <p>Loading notes…</p>}
+      {treeResult.state === "error" && (
+        <p role="alert">Could not load notes: {treeResult.message}</p>
       )}
-      {result.state === "ready" && (
+      {treeResult.state === "ready" && (
         <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
           <NoteTreeItem
-            node={result.tree.root}
+            node={treeResult.tree.root}
             selectedPath={selectedPath}
             onSelect={onSelect}
             onMutate={handleMutate}
@@ -395,10 +398,12 @@ function NotePanel({
   selectedPath,
   Editor,
   debounceMs,
+  wikiLinks,
 }: {
   selectedPath: string | null;
   Editor: EditorComponent;
   debounceMs?: number;
+  wikiLinks?: WikiLinkContext;
 }) {
   const result = useNote(selectedPath);
   const ready = result.state === "ready";
@@ -421,7 +426,11 @@ function NotePanel({
       )}
       {result.state === "ready" && (
         <article data-testid="note-content" data-note-path={result.note.path}>
-          <Editor markdown={result.note.markdown} onChange={onChange} />
+          <Editor
+            markdown={result.note.markdown}
+            onChange={onChange}
+            wikiLinks={wikiLinks}
+          />
         </article>
       )}
     </section>
@@ -440,8 +449,27 @@ export interface AppProps {
 }
 
 export function App({ Editor = TipTapEditor, debounceMs }: AppProps = {}) {
-  const result = useHealth();
+  const health = useHealth();
   const [selected, setSelected] = useState<string | null>(null);
+  // The note tree is fetched once here and shared by the nav (rendering) and the
+  // editor (wikilink resolution). Bumping the token refetches it after a mutation.
+  const [reloadToken, setReloadToken] = useState(0);
+  const treeResult = useTree(fetch, reloadToken);
+  const reloadTree = useCallback(() => setReloadToken((token) => token + 1), []);
+
+  // Resolve `[[wikilinks]]` against the loaded tree, entirely client-side: build a
+  // title index once per tree and hand the editor a resolver, the autocomplete
+  // titles, and a navigate-to-note callback. Undefined until the tree is ready, so
+  // links render as plain text during load.
+  const wikiLinks = useMemo<WikiLinkContext | undefined>(() => {
+    if (treeResult.state !== "ready") return undefined;
+    const index = buildTitleIndex(treeResult.tree.root);
+    return {
+      titles: index.titles,
+      resolve: (target) => resolveTitle(index, target),
+      onNavigate: (path) => setSelected(path),
+    };
+  }, [treeResult]);
 
   return (
     <div
@@ -451,30 +479,36 @@ export function App({ Editor = TipTapEditor, debounceMs }: AppProps = {}) {
         fontFamily: "ui-monospace, monospace",
       }}
     >
-      <NavPanel selectedPath={selected} onSelect={setSelected} />
+      <NavPanel
+        treeResult={treeResult}
+        selectedPath={selected}
+        onSelect={setSelected}
+        onReload={reloadTree}
+      />
       <main style={{ flex: 1, padding: "2rem" }}>
         <h1>Stout</h1>
         <NotePanel
           selectedPath={selected}
           Editor={Editor}
           debounceMs={debounceMs}
+          wikiLinks={wikiLinks}
         />
         <section>
           <h2>Service health</h2>
-          {result.state === "loading" && <p>Checking health…</p>}
-          {result.state === "error" && (
-            <p role="alert">Health check failed: {result.message}</p>
+          {health.state === "loading" && <p>Checking health…</p>}
+          {health.state === "error" && (
+            <p role="alert">Health check failed: {health.message}</p>
           )}
-          {result.state === "ready" && (
+          {health.state === "ready" && (
             <dl>
               <dt>Status</dt>
-              <dd data-testid="status">{result.health.status}</dd>
+              <dd data-testid="status">{health.health.status}</dd>
               <dt>Database</dt>
               <dd data-testid="database">
-                {result.health.database ? "connected" : "unavailable"}
+                {health.health.database ? "connected" : "unavailable"}
               </dd>
               <dt>Migration</dt>
-              <dd data-testid="migration">{result.health.migration}</dd>
+              <dd data-testid="migration">{health.health.migration}</dd>
             </dl>
           )}
         </section>

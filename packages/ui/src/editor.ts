@@ -17,11 +17,28 @@ import type { JSONContent } from "@tiptap/core";
 import {
   parseInline,
   parseMarkdown,
+  parseWikiLink,
   type InlineMark,
   type MarkdownBlock,
   type MarkdownSpan,
+  type WikiLink,
 } from "@stout/core";
 import type { ReactElement } from "react";
+
+/**
+ * The wikilink context the editor renders against: how to resolve a `[[link]]`
+ * target to a note, the titles available for `[[` autocomplete, and where to
+ * navigate when a resolved link is clicked. Supplied by `App` from the loaded
+ * note tree; the editor stays agnostic of how resolution works.
+ */
+export interface WikiLinkContext {
+  /** Every note title, for `[[` autocomplete suggestions. */
+  titles: string[];
+  /** Resolve a link target (a note title) to its note `path`, or `null` if broken. */
+  resolve: (target: string) => string | null;
+  /** Navigate to a resolved note (its `path`) when its link is clicked. */
+  onNavigate?: (path: string, target: string) => void;
+}
 
 /** "Markdown in, change events out" — the contract every Editor honors. */
 export interface EditorProps {
@@ -31,6 +48,11 @@ export interface EditorProps {
   onChange?: (markdown: string) => void;
   /** Whether the note is editable (default `true`). */
   editable?: boolean;
+  /**
+   * Wikilink rendering/navigation/autocomplete context. When omitted, `[[links]]`
+   * render as plain literal text (no styling, navigation, or autocomplete).
+   */
+  wikiLinks?: WikiLinkContext;
 }
 
 /** A swappable Editor: a React component honoring {@link EditorProps}. */
@@ -157,4 +179,70 @@ export function tipTapDocToMarkdown(doc: JSONContent): string {
     .map(nodeToMarkdown)
     .filter((block): block is string => block !== null);
   return `${blocks.join("\n\n").trim()}\n`;
+}
+
+/** A `[[wikilink]]` found in a run of text, with its character offsets. */
+export interface WikiLinkMatch {
+  /** Offset of the opening `[[` in the scanned text. */
+  start: number;
+  /** Offset just past the closing `]]`. */
+  end: number;
+  /** The parsed link. */
+  link: WikiLink;
+}
+
+// Mirrors `core`'s wikilink pattern; the global flag is for position scanning.
+const WIKILINK_SCAN = /\[\[([^\]\n]+?)\]\]/gu;
+
+/**
+ * Find every `[[wikilink]]` in a run of text, with offsets — the input the editor
+ * decoration uses to underline links in place. Pure; skips empty-target `[[ ]]`.
+ */
+export function scanWikiLinks(text: string): WikiLinkMatch[] {
+  const matches: WikiLinkMatch[] = [];
+  for (const m of text.matchAll(WIKILINK_SCAN)) {
+    const link = parseWikiLink(m[1]);
+    if (link && m.index !== undefined) {
+      matches.push({ start: m.index, end: m.index + m[0].length, link });
+    }
+  }
+  return matches;
+}
+
+/**
+ * Extract the in-progress `[[` autocomplete query from the text *before* the
+ * cursor, or `null` when the cursor is not inside an open, un-aliased wikilink.
+ *
+ * Returns the text typed after the nearest unclosed `[[` (e.g. `"Pro"` for
+ * `"see [[Pro"`). Bails once the link is closed (`]]`), a pipe starts an alias
+ * (`|`), a new bracket appears, or a newline intervenes — pure string logic, so
+ * it is unit-tested without a live editor.
+ */
+export function wikiLinkQuery(textBefore: string): string | null {
+  const open = textBefore.lastIndexOf("[[");
+  if (open === -1) return null;
+  const after = textBefore.slice(open + 2);
+  if (/[[\]\n|]/u.test(after)) return null;
+  return after;
+}
+
+/**
+ * Rank note titles for a `[[` autocomplete `query`: case-insensitive substring
+ * matches, earliest match first, ties broken alphabetically, deduped, capped at
+ * `limit`. An empty query returns the first `limit` titles. Pure and testable.
+ */
+export function filterTitles(titles: string[], query: string, limit = 8): string[] {
+  const q = query.trim().toLowerCase();
+  const seen = new Set<string>();
+  const ranked: Array<{ title: string; rank: number }> = [];
+  for (const title of titles) {
+    const lower = title.toLowerCase();
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    const at = q === "" ? 0 : lower.indexOf(q);
+    if (at === -1) continue;
+    ranked.push({ title, rank: at });
+  }
+  ranked.sort((a, b) => a.rank - b.rank || a.title.localeCompare(b.title));
+  return ranked.slice(0, limit).map((m) => m.title);
 }

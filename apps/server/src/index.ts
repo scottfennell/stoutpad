@@ -4,6 +4,7 @@ import {
   applyNoteSync,
   createNote,
   moveNote,
+  readLinkGraph,
   readNote,
   readNoteTree,
   renameNote,
@@ -58,6 +59,7 @@ async function main(): Promise<void> {
   const app = createApp({
     getHealth,
     getTree: () => readNoteTree(gitEngine),
+    getLinks: () => readLinkGraph(gitEngine),
     getNote: (path) => readNote(gitEngine, path),
     saveNote: (path, markdown) => writeNote(gitEngine, path, markdown),
     syncNote: (request) => applyNoteSync(gitEngine, request),

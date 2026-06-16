@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import express, { type Express, type Response } from "express";
 import {
   HEALTH_PATH,
+  LINKS_PATH,
   NOTE_CREATE_PATH,
   NOTE_MOVE_PATH,
   NOTE_PATH,
@@ -11,6 +12,7 @@ import {
   SYNC_PATH,
   TREE_PATH,
   type HealthStatus,
+  type LinkGraphResponse,
   type NoteContentResponse,
   type NoteCreateRequest,
   type NoteMoveRequest,
@@ -31,6 +33,12 @@ export interface AppDeps {
    * real repo. Omit to skip mounting the tree endpoint.
    */
   getTree?: () => Promise<NoteTreeResponse>;
+  /**
+   * Produce the note link graph (`[[wikilinks]]` between notes, plus broken
+   * links). Injected so HTTP behavior is tested without a real repo. Omit to skip
+   * mounting the links endpoint.
+   */
+  getLinks?: () => Promise<LinkGraphResponse>;
   /**
    * Read a single note's content by identity (tree `path`), or resolve to `null`
    * when the note is missing (mapped to a 404). Injected so HTTP behavior is
@@ -126,6 +134,21 @@ export function createApp(deps: AppDeps): Express {
     app.get(TREE_PATH, async (_req, res) => {
       try {
         res.json(await getTree());
+      } catch (err) {
+        res.status(500).json({
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+  }
+
+  if (deps.getLinks) {
+    const getLinks = deps.getLinks;
+    // `GET /api/links` returns the whole note link graph (resolved edges + broken
+    // links). Read-only, like the tree endpoint.
+    app.get(LINKS_PATH, async (_req, res) => {
+      try {
+        res.json(await getLinks());
       } catch (err) {
         res.status(500).json({
           error: err instanceof Error ? err.message : String(err),

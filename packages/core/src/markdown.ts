@@ -10,8 +10,9 @@
  * Scope for this slice (see `docs/adr/0002-editor-seam-and-tiptap.md`): the block
  * grammar Stout's editor renders today — headings, paragraphs, bullet lists, and
  * GFM-style task lists (checkboxes) — plus a minimal inline grammar (`**bold**`,
- * `*italic*`, `` `code` ``). Nested lists are flattened to a single level and
- * other constructs degrade to paragraphs; richer grammar lands in later slices.
+ * `*italic*`, `` `code` ``, and `[[wikilinks]]`). Nested lists are flattened to a
+ * single level and other constructs degrade to paragraphs; richer grammar lands
+ * in later slices.
  */
 
 /** A heading level, `#` (1) through `######` (6). */
@@ -20,12 +21,33 @@ export type HeadingLevel = 1 | 2 | 3 | 4 | 5 | 6;
 /** An inline formatting mark applied to a run of text. */
 export type InlineMark = "bold" | "italic" | "code";
 
+/**
+ * A `[[wikilink]]` to another note by its **title** (see `core/wikilink`).
+ *
+ * Written `[[Target]]` or `[[Target|Alias]]`: `target` is the note title to
+ * resolve, `alias` (when present) is the text to display instead. The link is
+ * resolved to a note `path` by `core/wikilink`; this module only parses the
+ * syntax out of the Markdown.
+ */
+export interface WikiLink {
+  /** The note title this link points at (`[[target]]`). */
+  target: string;
+  /** Display text override, if the link was written `[[target|alias]]`. */
+  alias?: string;
+}
+
 /** A run of inline text with zero or more formatting marks. */
 export interface MarkdownSpan {
   /** The literal text of the run (delimiters already stripped). */
   text: string;
   /** Formatting marks applied to this run. */
   marks: InlineMark[];
+  /**
+   * Set when this span is a `[[wikilink]]`. The span's `text` stays the **literal**
+   * `[[…]]` source (so it round-trips through serialization unchanged); `link`
+   * carries the parsed target/alias for the editor to render and resolve.
+   */
+  link?: WikiLink;
 }
 
 /** A single checkbox item in a task list. */
@@ -132,13 +154,51 @@ export function parseMarkdown(markdown: string): MarkdownDocument {
   return { blocks };
 }
 
-const INLINE = /(`+)([^`]+?)\1|(\*\*)([^*]+?)\*\*|(\*)([^*]+?)\*/su;
+// A `[[wikilink]]` is matched first and atomically, so its inner text is never
+// re-interpreted as bold/italic/code. Group map: 1 `[[`, 2 link inner, 3 code
+// fence (backref `\3`), 4 code text, 5 `**`, 6 bold text, 7 `*`, 8 italic text.
+const INLINE =
+  /(\[\[)([^\]\n]+?)\]\]|(`+)([^`]+?)\3|(\*\*)([^*]+?)\*\*|(\*)([^*]+?)\*/su;
+
+/** Pattern matching a single `[[wikilink]]`; group 1 is the inner `target|alias`. */
+const WIKILINK = /\[\[([^\]\n]+?)\]\]/gu;
+
+/**
+ * Parse the inner text of a `[[wikilink]]` (`target` or `target|alias`) into a
+ * {@link WikiLink}, or `null` when the target is empty (so `[[ ]]` is not a link).
+ * Pure: the syntax only — resolution to a note `path` lives in `core/wikilink`.
+ */
+export function parseWikiLink(inner: string): WikiLink | null {
+  const pipe = inner.indexOf("|");
+  const target = (pipe === -1 ? inner : inner.slice(0, pipe)).trim();
+  if (target === "") return null;
+  const alias = pipe === -1 ? "" : inner.slice(pipe + 1).trim();
+  return alias ? { target, alias } : { target };
+}
+
+/**
+ * Extract every `[[wikilink]]` from a note's Markdown, in document order.
+ *
+ * Pure and global: scans the whole string (across blocks), skipping empty-target
+ * `[[ ]]`. This is the link-graph's parsing primitive — `core/wikilink` resolves
+ * each {@link WikiLink} to a note and detects broken links from the result.
+ */
+export function extractWikiLinks(markdown: string): WikiLink[] {
+  const links: WikiLink[] = [];
+  for (const match of markdown.matchAll(WIKILINK)) {
+    const link = parseWikiLink(match[1]);
+    if (link) links.push(link);
+  }
+  return links;
+}
 
 /**
  * Resolve a run of inline Markdown into formatted {@link MarkdownSpan spans}.
  *
- * Supports `**bold**`, `*italic*`, and `` `code` ``; marks are not nested or
- * combined. Always returns at least one span (possibly empty) so callers can map
+ * Supports `**bold**`, `*italic*`, `` `code` ``, and `[[wikilinks]]`; marks are
+ * not nested or combined. A wikilink span keeps the literal `[[…]]` as its `text`
+ * (so it serializes back unchanged) and carries the parsed {@link WikiLink} in
+ * `link`. Always returns at least one span (possibly empty) so callers can map
  * directly to editor text nodes.
  */
 export function parseInline(text: string): MarkdownSpan[] {
@@ -161,14 +221,24 @@ export function parseInline(text: string): MarkdownSpan[] {
     }
     plain += rest.slice(0, match.index);
     if (match[1] !== undefined) {
-      pushPlain();
-      spans.push({ text: match[2], marks: ["code"] });
+      const link = parseWikiLink(match[2]);
+      if (link) {
+        pushPlain();
+        // Keep the literal `[[…]]` so it round-trips; carry the parsed link.
+        spans.push({ text: match[0], marks: [], link });
+      } else {
+        // Empty-target `[[ ]]` isn't a link; treat it as plain text.
+        plain += match[0];
+      }
     } else if (match[3] !== undefined) {
       pushPlain();
-      spans.push({ text: match[4], marks: ["bold"] });
+      spans.push({ text: match[4], marks: ["code"] });
+    } else if (match[5] !== undefined) {
+      pushPlain();
+      spans.push({ text: match[6], marks: ["bold"] });
     } else {
       pushPlain();
-      spans.push({ text: match[6], marks: ["italic"] });
+      spans.push({ text: match[8], marks: ["italic"] });
     }
     rest = rest.slice(match.index + match[0].length);
   }

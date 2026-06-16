@@ -13,13 +13,19 @@
  * lets a future browser/`isomorphic-git` backend drop in unchanged.
  */
 
-import { buildNoteTree, type NoteFile, type NoteTreeResponse } from "./note-tree.js";
+import { buildNoteTree, type NoteFile, type NoteNode, type NoteTreeResponse } from "./note-tree.js";
 import {
   noteFileCandidates,
   normalizeNotePath,
   type NoteContentResponse,
 } from "./note-content.js";
 import { canonicalizeMarkdown } from "./markdown.js";
+import {
+  buildLinkGraph,
+  buildTitleIndex,
+  type LinkGraphResponse,
+  type NoteContent,
+} from "./wikilink.js";
 
 /** Reads the note files from a Git working clone. */
 export interface GitEngine {
@@ -125,4 +131,33 @@ export async function writeNote(
   const file = await resolveWriteTarget(engine, notePath);
   await engine.writeNoteFile(file, canonical, `Edit ${file}`);
   return { path: normalizeNotePath(notePath), file, markdown: canonical };
+}
+
+/**
+ * Read every note's Markdown via the injected {@link GitEngine} and build the
+ * unified {@link LinkGraphResponse link graph} of `[[wikilinks]]` between notes.
+ *
+ * The Node/Git reads (listing files, reading each backing file) stay in the
+ * engine; the tree mapping, title indexing, and link resolution stay pure
+ * (`core/note-tree`, `core/wikilink`). Notes are visited in tree order, so the
+ * resulting graph is deterministic. The server exposes this at `GET /api/links`.
+ */
+export async function readLinkGraph(engine: GitEngine): Promise<LinkGraphResponse> {
+  const files = await engine.listNoteFiles();
+  const root = buildNoteTree(files);
+  const index = buildTitleIndex(root);
+
+  const notes: NoteContent[] = [];
+  const visit = async (node: NoteNode): Promise<void> => {
+    if (node.file !== null) {
+      const markdown = await engine.readNoteFile(node.file);
+      if (markdown !== null) {
+        notes.push({ path: node.path, title: node.title, markdown });
+      }
+    }
+    for (const child of node.children) await visit(child);
+  };
+  await visit(root);
+
+  return buildLinkGraph(notes, index);
 }

@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  extractWikiLinks,
   parseInline,
   parseMarkdown,
+  parseWikiLink,
   serializeMarkdown,
   spansToPlainText,
   type MarkdownDocument,
@@ -91,6 +93,74 @@ describe("parseInline", () => {
   it("round-trips to plain text via spansToPlainText", () => {
     expect(spansToPlainText(parseInline("a **b** c"))).toBe("a b c");
   });
+
+  it("keeps a wikilink as one literal span carrying the parsed link", () => {
+    expect(parseInline("see [[Note Name]] now")).toEqual([
+      { text: "see ", marks: [] },
+      { text: "[[Note Name]]", marks: [], link: { target: "Note Name" } },
+      { text: " now", marks: [] },
+    ]);
+  });
+
+  it("carries the alias of a `[[target|alias]]` link", () => {
+    expect(parseInline("[[home|Start here]]")).toEqual([
+      {
+        text: "[[home|Start here]]",
+        marks: [],
+        link: { target: "home", alias: "Start here" },
+      },
+    ]);
+  });
+
+  it("does not re-interpret formatting inside a wikilink", () => {
+    // The `*` inside the link must not become italic — the link is atomic.
+    expect(parseInline("[[a *b* c]]")).toEqual([
+      { text: "[[a *b* c]]", marks: [], link: { target: "a *b* c" } },
+    ]);
+  });
+
+  it("treats an empty-target `[[ ]]` as plain text, not a link", () => {
+    expect(parseInline("x [[ ]] y")).toEqual([{ text: "x [[ ]] y", marks: [] }]);
+  });
+});
+
+describe("parseWikiLink", () => {
+  it("parses a bare target", () => {
+    expect(parseWikiLink("Note Name")).toEqual({ target: "Note Name" });
+  });
+
+  it("splits a `target|alias` on the first pipe and trims both sides", () => {
+    expect(parseWikiLink("  home  |  Start here  ")).toEqual({
+      target: "home",
+      alias: "Start here",
+    });
+  });
+
+  it("drops an empty alias (`target|`)", () => {
+    expect(parseWikiLink("home|")).toEqual({ target: "home" });
+  });
+
+  it("returns null for an empty or whitespace-only target", () => {
+    expect(parseWikiLink("")).toBeNull();
+    expect(parseWikiLink("   ")).toBeNull();
+    expect(parseWikiLink("|alias")).toBeNull();
+  });
+});
+
+describe("extractWikiLinks", () => {
+  it("collects every wikilink across blocks, in document order", () => {
+    const markdown = "# A\n\nlink to [[One]] and [[Two|second]].\n\n- [[Three]]\n";
+    expect(extractWikiLinks(markdown)).toEqual([
+      { target: "One" },
+      { target: "Two", alias: "second" },
+      { target: "Three" },
+    ]);
+  });
+
+  it("skips empty-target links and returns [] when there are none", () => {
+    expect(extractWikiLinks("no links here, just [[ ]] noise")).toEqual([]);
+    expect(extractWikiLinks("plain text")).toEqual([]);
+  });
 });
 
 describe("serializeMarkdown", () => {
@@ -107,6 +177,11 @@ describe("serializeMarkdown", () => {
 
   it("emits the empty string for an empty note", () => {
     expect(serializeMarkdown(parseMarkdown(""))).toBe("");
+  });
+
+  it("round-trips wikilinks verbatim through canonicalization", () => {
+    const note = "See [[Note Name]] and [[home|Start]].\n";
+    expect(serializeMarkdown(parseMarkdown(note))).toBe(note);
   });
 
   it("normalizes loose Markdown to the canonical byte form", () => {

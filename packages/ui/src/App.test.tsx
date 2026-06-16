@@ -91,6 +91,32 @@ const EditableFake: EditorComponent = ({ markdown, onChange }) => (
   </button>
 );
 
+/**
+ * An Editor seam that surfaces the injected wikilink context: the autocomplete
+ * titles, a sample resolution, and a button that navigates a `[[link]]` target —
+ * so the App's tree → resolver → navigate wiring is testable without TipTap.
+ */
+const WikiLinkProbe: EditorComponent = ({ wikiLinks }) => (
+  <div>
+    <span data-testid="wikilink-titles">{(wikiLinks?.titles ?? []).join(",")}</span>
+    <span data-testid="wikilink-resolve">
+      {wikiLinks?.resolve("Projects") ?? "broken"}
+    </span>
+    <span data-testid="wikilink-resolve-missing">
+      {wikiLinks?.resolve("Nope") ?? "broken"}
+    </span>
+    <button
+      type="button"
+      data-testid="wikilink-nav"
+      onClick={() =>
+        wikiLinks?.onNavigate?.(wikiLinks.resolve("Projects") ?? "", "Projects")
+      }
+    >
+      go to projects
+    </button>
+  </div>
+);
+
 describe("App", () => {
   it("renders the health result returned by the server", async () => {
     stubApi({ [HEALTH_PATH]: health, [TREE_PATH]: tree });
@@ -409,6 +435,73 @@ describe("App note mutations", () => {
       await screen.findByText(/a note already exists at projects\/ideas/),
     ).toBeTruthy();
     // A rejected create never reshapes the tree, so no reload happens.
+    expect(getCount(TREE_PATH)).toBe(1);
+  });
+});
+
+describe("App wikilinks", () => {
+  it("resolves [[link]] targets against the loaded tree by title", async () => {
+    const note: NoteContentResponse = {
+      path: "notes",
+      file: "notes.md",
+      markdown: "See [[Projects]]\n",
+    };
+    stubApi({
+      [HEALTH_PATH]: health,
+      [TREE_PATH]: tree,
+      [`${NOTE_PATH}?path=notes`]: note,
+    });
+
+    render(<App Editor={WikiLinkProbe} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+
+    // Every note title is offered for `[[` autocomplete, in tree order...
+    await waitFor(() =>
+      expect(screen.getByTestId("wikilink-titles").textContent).toBe(
+        "Home,Projects,Ideas,Notes",
+      ),
+    );
+    // ...a real title resolves to its note identity, an unknown one is broken.
+    expect(screen.getByTestId("wikilink-resolve").textContent).toBe("projects");
+    expect(screen.getByTestId("wikilink-resolve-missing").textContent).toBe("broken");
+  });
+
+  it("opens the linked note when a resolved wikilink is followed", async () => {
+    const notes: NoteContentResponse = {
+      path: "notes",
+      file: "notes.md",
+      markdown: "See [[Projects]]\n",
+    };
+    const projects: NoteContentResponse = {
+      path: "projects",
+      file: "projects/_index.md",
+      markdown: "# Projects\n",
+    };
+    stubApi({
+      [HEALTH_PATH]: health,
+      [TREE_PATH]: tree,
+      [`${NOTE_PATH}?path=notes`]: notes,
+      [`${NOTE_PATH}?path=projects`]: projects,
+    });
+
+    render(<App Editor={WikiLinkProbe} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("note-content").getAttribute("data-note-path"),
+      ).toBe("notes"),
+    );
+
+    // Following the link navigates the center panel to the resolved note...
+    fireEvent.click(screen.getByTestId("wikilink-nav"));
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("note-content").getAttribute("data-note-path"),
+      ).toBe("projects"),
+    );
+    // ...without refetching the tree (resolution is client-side).
     expect(getCount(TREE_PATH)).toBe(1);
   });
 });

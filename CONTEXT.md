@@ -132,6 +132,39 @@ renders live formatting and checkboxes. The seam keeps the rich editor (TipTap /
 ProseMirror, DOM-bound) out of `@stout/core`, mirroring how the git engine keeps
 Node out of core.
 
+### Wikilink
+
+An inter-note reference written `[[Note Name]]` (or `[[Note Name|alias]]`) in a
+note's **canonical Markdown**. A wikilink targets a note by its **title**, not its
+`path`: it **resolves** to whichever note bears the matching title (normalized —
+trimmed, internal whitespace collapsed, case-insensitive), or to nothing. A
+wikilink that matches no note is a **broken link** — a surfaced, first-class state
+(the editor flags it), not an error. Because resolution depends on the whole note
+tree, a link can break or re-resolve as notes are renamed or moved; the rare
+ambiguous title (two notes sharing one) resolves deterministically to the first in
+tree order. Parsing the `[[…]]` syntax is `core/markdown` (`parseWikiLink` /
+`extractWikiLinks`), which keeps the **literal** `[[…]]` text so the note still
+round-trips byte-for-byte; resolving a parsed link against the tree is the pure
+`core/wikilink` (`buildTitleIndex` / `resolveWikiLink`). In the editor a wikilink
+is painted by a **decoration** (never a Markdown rewrite): resolved links are
+clickable (navigating to the target note), broken links are styled distinctly, and
+typing `[[` opens title **autocomplete**. The editor resolves links client-side
+off the already-loaded tree (no fetch); resolution and rendering are decorative
+only, so they never perturb the canonical bytes.
+
+### Link graph
+
+The whole-repo set of resolved note→note links, plus the broken links, derived
+from every note's wikilinks. Built purely by `core/wikilink`'s `buildLinkGraph`
+(extract every wikilink, resolve each against the title index) into deduped,
+sorted `edges` (a note linking to another; self-links ignored) and `broken` links
+(a target matching no note) — a deterministic function of the notes, so the same
+content always yields byte-identical output. Exposed read-only at `GET /api/links`
+(`LINKS_PATH` / `LinkGraphResponse`), wired to the `readLinkGraph` git-engine
+composition. It is the queryable, whole-repo view of linking (the basis for a
+future backlinks panel / graph navigation); the editor does not need it, resolving
+links locally off the tree instead.
+
 ### Working clone
 
 The checked-out git clone (`<STOUT_DATA_DIR>/clone`) that the server reads and

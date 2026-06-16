@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  readLinkGraph,
   readNote,
   writeNote,
   type NoteFile,
@@ -113,5 +114,24 @@ describe("writeNote", () => {
     await writeNote(engine, "notes", "# Changed\n");
     await writeNote(engine, "notes", "# Changed\n");
     expect(engine.commits).toHaveLength(1);
+  });
+});
+
+describe("readLinkGraph", () => {
+  it("reads every note and builds the resolved + broken link graph", async () => {
+    const engine = new InMemoryGitEngine({
+      "_index.md": "# Home\n\nStart at [[Projects]].\n",
+      "projects/_index.md": "# Projects\n\nSee [[Ideas]] and [[Ghost]].\n",
+      "projects/ideas.md": "# Ideas\n\nback [[Home]]\n",
+    });
+
+    const graph = await readLinkGraph(engine);
+
+    expect(graph.edges).toEqual([
+      { from: "", to: "projects" },
+      { from: "projects", to: "projects/ideas" },
+      { from: "projects/ideas", to: "" },
+    ]);
+    expect(graph.broken).toEqual([{ from: "projects", target: "Ghost" }]);
   });
 });

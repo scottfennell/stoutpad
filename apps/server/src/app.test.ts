@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import request from "supertest";
 import {
   HEALTH_PATH,
+  LINKS_PATH,
   NOTE_CREATE_PATH,
   NOTE_MOVE_PATH,
   NOTE_PATH,
@@ -10,6 +11,7 @@ import {
   SYNC_PATH,
   TREE_PATH,
   type HealthStatus,
+  type LinkGraphResponse,
   type NoteContentResponse,
   type NoteSyncRequest,
   type NoteTreeResponse,
@@ -105,6 +107,50 @@ describe("tree round-trip", () => {
     const app = createApp({ getHealth: async () => okHealth });
 
     const res = await request(app).get(TREE_PATH);
+
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("links round-trip", () => {
+  const sampleGraph: LinkGraphResponse = {
+    edges: [
+      { from: "", to: "notes" },
+      { from: "notes", to: "projects" },
+    ],
+    broken: [{ from: "notes", target: "Ghost" }],
+  };
+
+  it("returns the link graph as JSON", async () => {
+    const app = createApp({
+      getHealth: async () => okHealth,
+      getLinks: async () => sampleGraph,
+    });
+
+    const res = await request(app).get(LINKS_PATH);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(sampleGraph);
+  });
+
+  it("returns 500 when building the link graph fails", async () => {
+    const app = createApp({
+      getHealth: async () => okHealth,
+      getLinks: async () => {
+        throw new Error("repo unreadable");
+      },
+    });
+
+    const res = await request(app).get(LINKS_PATH);
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toContain("repo unreadable");
+  });
+
+  it("does not mount the links endpoint when no reader is injected", async () => {
+    const app = createApp({ getHealth: async () => okHealth });
+
+    const res = await request(app).get(LINKS_PATH);
 
     expect(res.status).toBe(404);
   });
