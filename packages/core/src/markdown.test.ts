@@ -26,6 +26,16 @@ Things to **buy** today:
 - Check \`expiry\` dates
 `;
 
+const WITH_CODE_BLOCK = `# Mermaid
+
+\`\`\`mermaid
+graph TD
+  A --> B
+\`\`\`
+
+After the diagram.
+`;
+
 describe("parseMarkdown", () => {
   it("parses a representative note into ordered blocks", () => {
     const doc: MarkdownDocument = parseMarkdown(SAMPLE);
@@ -72,6 +82,22 @@ describe("parseMarkdown", () => {
     const doc = parseMarkdown("* one\n+ two\n");
     expect(doc.blocks).toEqual([
       { type: "bulletList", items: ["one", "two"] },
+    ]);
+  });
+
+  it("parses fenced code blocks with an optional language tag", () => {
+    const doc = parseMarkdown(WITH_CODE_BLOCK);
+    expect(doc.blocks).toEqual([
+      { type: "heading", level: 1, text: "Mermaid" },
+      { type: "codeBlock", language: "mermaid", text: "graph TD\n  A --> B" },
+      { type: "paragraph", text: "After the diagram." },
+    ]);
+  });
+
+  it("treats an unclosed fence as a code block through end of note", () => {
+    const doc = parseMarkdown("\`\`\`ts\nconst x = 1;\n");
+    expect(doc.blocks).toEqual([
+      { type: "codeBlock", language: "ts", text: "const x = 1;" },
     ]);
   });
 });
@@ -198,6 +224,7 @@ describe("serializeMarkdown", () => {
   it("is idempotent: serialize -> parse -> serialize is byte-stable", () => {
     const inputs = [
       SAMPLE,
+      WITH_CODE_BLOCK,
       "",
       "# Only a heading\n",
       "Just a paragraph with *italic* and `code`.\n",
@@ -212,6 +239,13 @@ describe("serializeMarkdown", () => {
       // parse(serialize(x)) round-trips: re-parsing canonical text is stable.
       expect(parseMarkdown(twice)).toEqual(parseMarkdown(once));
     }
+  });
+
+  it("uses a longer fence when the code contains triple backticks", () => {
+    const markdown = serializeMarkdown([
+      { type: "codeBlock", language: "md", text: "before\n\`\`\`\nafter" },
+    ]);
+    expect(markdown).toBe("\`\`\`\`md\nbefore\n\`\`\`\nafter\n\`\`\`\`\n");
   });
 });
 

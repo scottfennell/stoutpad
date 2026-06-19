@@ -13,7 +13,8 @@
  * editor's node tree, so the editor stays a thin rendering shell over the seam.
  * Standalone `![alt](assets/x.png)` image paragraphs are mapped to live `image`
  * nodes (rewriting the repo-relative path to the server's hosted `/assets/x.png`
- * URL and back), so embedded attachments render in place.
+ * URL and back), and fenced Markdown code blocks are mapped to TipTap
+ * `codeBlock` nodes carrying their language tag.
  */
 
 import type { JSONContent } from "@tiptap/core";
@@ -22,6 +23,7 @@ import {
   parseInline,
   parseMarkdown,
   parseWikiLink,
+  serializeMarkdown,
   type InlineMark,
   type MarkdownBlock,
   type MarkdownSpan,
@@ -131,6 +133,11 @@ function blockToNode(block: MarkdownBlock): JSONContent {
       );
     case "paragraph":
       return imageNode(block.text) ?? paragraphNode(block.text);
+    case "codeBlock":
+      return withContent(
+        { type: "codeBlock", attrs: { language: block.language ?? null } },
+        block.text.length > 0 ? [{ type: "text", text: block.text }] : [],
+      );
     case "bulletList":
       return {
         type: "bulletList",
@@ -182,6 +189,12 @@ function firstParagraphText(item: JSONContent): string {
   return inlineText(paragraph?.content);
 }
 
+function plainText(content: JSONContent[] | undefined): string {
+  return (content ?? [])
+    .map((node) => (node.type === "text" ? node.text ?? "" : plainText(node.content)))
+    .join("");
+}
+
 function nodeToMarkdown(node: JSONContent): string | null {
   switch (node.type) {
     case "heading": {
@@ -190,6 +203,12 @@ function nodeToMarkdown(node: JSONContent): string | null {
     }
     case "paragraph":
       return inlineText(node.content);
+    case "codeBlock": {
+      const language = typeof node.attrs?.language === "string" ? node.attrs.language : undefined;
+      return serializeMarkdown([
+        { type: "codeBlock", language, text: plainText(node.content) },
+      ]).trimEnd();
+    }
     case "bulletList":
       return (node.content ?? [])
         .map((item) => `- ${firstParagraphText(item)}`)

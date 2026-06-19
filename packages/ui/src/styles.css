@@ -560,6 +560,143 @@ body {
   padding: 2px 5px;
   border-radius: var(--radius-sm);
 }
+.note-editor .ProseMirror .code-block {
+  margin: 1.5rem 0;
+  border: 1px solid var(--color-outline-variant);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(180deg, #141718 0%, #101314 100%);
+  overflow: hidden;
+}
+.note-editor .ProseMirror .code-block__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 2.25rem;
+  padding: 0.5rem 0.875rem;
+  border-bottom: 1px solid rgba(156, 142, 130, 0.18);
+  background: rgba(255, 255, 255, 0.03);
+}
+.note-editor .ProseMirror .code-block__language {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-on-surface-variant);
+}
+.note-editor .ProseMirror .code-block__controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.note-editor .ProseMirror .code-block__language-input {
+  width: 8.5rem;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid rgba(156, 142, 130, 0.24);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--color-on-surface);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.note-editor .ProseMirror .code-block__language-input:focus {
+  outline: none;
+  border-color: var(--color-tertiary);
+}
+.note-editor .ProseMirror .code-block__toggle {
+  appearance: none;
+  border: 1px solid rgba(156, 142, 130, 0.24);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--color-on-surface-variant);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  padding: 0.35rem 0.5rem;
+}
+.note-editor .ProseMirror .code-block__toggle:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.note-editor .ProseMirror .code-block__body {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: stretch;
+}
+.note-editor .ProseMirror .code-block__line-numbers {
+  margin: 0;
+  padding: 0.875rem 0.75rem 0.875rem 0.875rem;
+  white-space: pre;
+  text-align: right;
+  user-select: none;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.65;
+  color: rgba(212, 196, 183, 0.42);
+  background: rgba(255, 255, 255, 0.02);
+  border-right: 1px solid rgba(156, 142, 130, 0.14);
+}
+.note-editor .ProseMirror .code-block pre {
+  margin: 0;
+  padding: 0.875rem 1rem;
+  overflow-x: auto;
+}
+.note-editor .ProseMirror .code-block pre code {
+  display: block;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-on-surface);
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre;
+}
+.note-editor .ProseMirror .code-block__preview {
+  padding: 0.875rem 1rem 1rem;
+  border-top: 1px solid rgba(156, 142, 130, 0.14);
+  overflow-x: auto;
+}
+.note-editor .ProseMirror .code-block__preview[hidden] {
+  display: none;
+}
+.note-editor .ProseMirror .code-block__preview svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+.note-editor .ProseMirror .code-block__preview-error {
+  color: var(--color-error);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.note-editor .ProseMirror .hljs-comment,
+.note-editor .ProseMirror .hljs-quote {
+  color: #9a8f86;
+}
+.note-editor .ProseMirror .hljs-keyword,
+.note-editor .ProseMirror .hljs-selector-tag,
+.note-editor .ProseMirror .hljs-literal,
+.note-editor .ProseMirror .hljs-section,
+.note-editor .ProseMirror .hljs-link {
+  color: #f2be8c;
+}
+.note-editor .ProseMirror .hljs-string,
+.note-editor .ProseMirror .hljs-title,
+.note-editor .ProseMirror .hljs-name,
+.note-editor .ProseMirror .hljs-type,
+.note-editor .ProseMirror .hljs-attribute,
+.note-editor .ProseMirror .hljs-symbol,
+.note-editor .ProseMirror .hljs-bullet,
+.note-editor .ProseMirror .hljs-addition {
+  color: #b8d49b;
+}
+.note-editor .ProseMirror .hljs-number,
+.note-editor .ProseMirror .hljs-variable,
+.note-editor .ProseMirror .hljs-template-variable,
+.note-editor .ProseMirror .hljs-operator,
+.note-editor .ProseMirror .hljs-deletion {
+  color: #ffb4ab;
+}
 .note-editor .ProseMirror blockquote {
   margin: 1.25rem 0;
   padding: 4px 0 4px 16px;
