@@ -308,9 +308,18 @@ function getCount(url: string): number {
     ).length;
 }
 
+/**
+ * Fill the in-app prompt dialog and confirm it. Replaces the old `window.prompt`
+ * stub: a mutation now opens a modal textbox + submit button.
+ */
+async function fillDialog(value: string, submitLabel: string): Promise<void> {
+  const input = (await screen.findByRole("textbox")) as HTMLInputElement;
+  fireEvent.change(input, { target: { value } });
+  fireEvent.click(screen.getByRole("button", { name: submitLabel }));
+}
+
 describe("App note mutations", () => {
   it("creates a child note under a parent and reselects it", async () => {
-    vi.stubGlobal("prompt", vi.fn(() => "Tasks"));
     const created: NoteContentResponse = {
       path: "projects/tasks",
       file: "projects/tasks.md",
@@ -326,6 +335,7 @@ describe("App note mutations", () => {
     render(<App Editor={FakeEditor} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "New note under Projects" }));
+    await fillDialog("Tasks", "Create");
 
     // The create endpoint receives the parent identity + the prompted name...
     await waitFor(() =>
@@ -342,7 +352,6 @@ describe("App note mutations", () => {
   });
 
   it("reloads the tree after a successful mutation", async () => {
-    vi.stubGlobal("prompt", vi.fn(() => "Tasks"));
     stubRoutes({
       [HEALTH_PATH]: { body: health },
       [TREE_PATH]: { body: tree },
@@ -357,13 +366,13 @@ describe("App note mutations", () => {
     expect(getCount(TREE_PATH)).toBe(1);
 
     fireEvent.click(screen.getByRole("button", { name: "New note under Home" }));
+    await fillDialog("Tasks", "Create");
 
     // The tree is refetched once the mutation lands, so the new note appears.
     await waitFor(() => expect(getCount(TREE_PATH)).toBe(2));
   });
 
   it("renames a note in place", async () => {
-    vi.stubGlobal("prompt", vi.fn(() => "Renamed"));
     stubRoutes({
       [HEALTH_PATH]: { body: health },
       [TREE_PATH]: { body: tree },
@@ -376,6 +385,7 @@ describe("App note mutations", () => {
     render(<App Editor={FakeEditor} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Rename Notes" }));
+    await fillDialog("Renamed", "Rename");
 
     await waitFor(() =>
       expect(postBodies(NOTE_RENAME_PATH)).toEqual([
@@ -385,7 +395,6 @@ describe("App note mutations", () => {
   });
 
   it("moves a note under the parent named in the prompt", async () => {
-    vi.stubGlobal("prompt", vi.fn(() => "projects"));
     stubRoutes({
       [HEALTH_PATH]: { body: health },
       [TREE_PATH]: { body: tree },
@@ -398,6 +407,7 @@ describe("App note mutations", () => {
     render(<App Editor={FakeEditor} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Move Notes" }));
+    await fillDialog("projects", "Move");
 
     await waitFor(() =>
       expect(postBodies(NOTE_MOVE_PATH)).toEqual([
@@ -407,7 +417,6 @@ describe("App note mutations", () => {
   });
 
   it("does not call the API when the create prompt is cancelled", async () => {
-    vi.stubGlobal("prompt", vi.fn(() => null));
     stubRoutes({
       [HEALTH_PATH]: { body: health },
       [TREE_PATH]: { body: tree },
@@ -417,6 +426,8 @@ describe("App note mutations", () => {
     render(<App Editor={FakeEditor} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "New note under Home" }));
+    // Dismiss the dialog instead of confirming it.
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
 
     // Give any (unexpected) request a tick to fire, then assert none did.
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -424,7 +435,6 @@ describe("App note mutations", () => {
   });
 
   it("shows the server's error message when a mutation is rejected", async () => {
-    vi.stubGlobal("prompt", vi.fn(() => "Ideas"));
     stubRoutes({
       [HEALTH_PATH]: { body: health },
       [TREE_PATH]: { body: tree },
@@ -437,6 +447,7 @@ describe("App note mutations", () => {
     render(<App Editor={FakeEditor} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "New note under Projects" }));
+    await fillDialog("Ideas", "Create");
 
     expect(
       await screen.findByText(/a note already exists at projects\/ideas/),

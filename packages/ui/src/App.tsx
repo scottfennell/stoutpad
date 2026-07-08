@@ -323,6 +323,117 @@ export function useNoteSync(
 /** A note-tree mutation requested from a node's affordances. */
 type TreeMutation = "create" | "rename" | "move";
 
+/**
+ * A mutation awaiting a name/target from the in-app prompt dialog. We can't use
+ * `window.prompt()` — it's unsupported in the Electron renderer (and blocks the
+ * event loop in the browser) — so opening a mutation stashes this and renders a
+ * small modal that collects the value before the mutation is posted.
+ */
+interface PendingMutation {
+  kind: TreeMutation;
+  node: NoteNode;
+  /** The dialog's label / question. */
+  label: string;
+  /** The textbox's initial value (e.g. the current title, for a rename). */
+  initial: string;
+  /** The confirm button's label (Create / Rename / Move). */
+  submitLabel: string;
+  /** Whether an empty value is a valid submission (true only for "move to root"). */
+  allowEmpty: boolean;
+}
+
+/**
+ * The in-app prompt modal that replaces `window.prompt()`. Collects a single
+ * line of text (a note name, or a move target) and confirms or cancels. Focuses
+ * and selects the field on open; Enter submits, Escape cancels.
+ */
+function PromptDialog({
+  pending,
+  onSubmit,
+  onCancel,
+}: {
+  pending: PendingMutation;
+  onSubmit: (value: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(pending.initial);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    const el = inputRef.current;
+    if (el) {
+      el.focus();
+      el.select();
+    }
+  }, []);
+
+  const canSubmit = pending.allowEmpty || value.trim() !== "";
+
+  return (
+    <div
+      className="dialog-backdrop"
+      role="presentation"
+      onClick={onCancel}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.4)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 1000,
+      }}
+    >
+      <form
+        className="dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={pending.label}
+        onClick={(event) => event.stopPropagation()}
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (canSubmit) onSubmit(value);
+        }}
+        style={{
+          background: "var(--surface, #fff)",
+          padding: "var(--panel-padding, 16px)",
+          borderRadius: "var(--radius, 8px)",
+          minWidth: "min(90vw, 360px)",
+          display: "flex",
+          flexDirection: "column",
+          gap: "12px",
+        }}
+      >
+        <label className="dialog__label">
+          {pending.label}
+          <input
+            ref={inputRef}
+            type="text"
+            className="dialog__input"
+            value={value}
+            onChange={(event) => setValue(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") onCancel();
+            }}
+            style={{ width: "100%", marginTop: "6px" }}
+          />
+        </label>
+        <div
+          className="dialog__actions"
+          style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}
+        >
+          <button type="button" className="btn" onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="submit" className="btn btn--primary" disabled={!canSubmit}>
+            {pending.submitLabel}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function NoteTreeItem({
   node,
   selectedPath,
@@ -436,26 +547,47 @@ function NavPanel({
   fetchImpl?: typeof fetch;
 }) {
   const [error, setError] = useState<string | null>(null);
+  // The in-app prompt dialog. We can't use window.prompt() — it's unsupported
+  // in the Electron renderer (and blocks the event loop in the browser) — so a
+  // pending mutation opens a small modal that collects the name/target.
+  const [pending, setPending] = useState<PendingMutation | null>(null);
 
-  const handleMutate = useCallback(
-    (kind: TreeMutation, node: NoteNode) => {
-      const run = async (): Promise<void> => {
-        if (kind === "create") {
-          const name = window.prompt(`New note under "${node.title || "Home"}"`);
-          if (name === null || name.trim() === "") return;
-          return select(await postNoteCreate(node.path, name, fetchImpl));
-        }
-        if (kind === "rename") {
-          const name = window.prompt(`Rename "${node.title}" to`, node.title);
-          if (name === null || name.trim() === "") return;
-          return select(await postNoteRename(node.path, name, fetchImpl));
-        }
-        const parent = window.prompt(
-          `Move "${node.title}" under which note? (blank = Home)`,
-        );
-        if (parent === null) return;
-        return select(await postNoteMove(node.path, parent.trim(), fetchImpl));
-      };
+  const handleMutate = useCallback((kind: TreeMutation, node: NoteNode) => {
+    if (kind === "create") {
+      setPending({
+        kind,
+        node,
+        label: `New note under "${node.title || "Home"}"`,
+        initial: "",
+        submitLabel: "Create",
+        allowEmpty: false,
+      });
+    } else if (kind === "rename") {
+      setPending({
+        kind,
+        node,
+        label: `Rename "${node.title}" to`,
+        initial: node.title,
+        submitLabel: "Rename",
+        allowEmpty: false,
+      });
+    } else {
+      setPending({
+        kind,
+        node,
+        label: `Move "${node.title}" under which note? (blank = Home)`,
+        initial: "",
+        submitLabel: "Move",
+        allowEmpty: true,
+      });
+    }
+  }, []);
+
+  const submitPending = useCallback(
+    (value: string) => {
+      if (pending === null) return;
+      const { kind, node } = pending;
+      setPending(null);
       // Reselect the affected note and refetch the (reshaped) tree on success;
       // surface a rejected mutation (duplicate/invalid name, illegal move) inline.
       const select = (res: { path: string }): void => {
@@ -463,16 +595,28 @@ function NavPanel({
         onSelect(res.path);
         onReload();
       };
+      const run = async (): Promise<void> => {
+        if (kind === "create") {
+          if (value.trim() === "") return;
+          return select(await postNoteCreate(node.path, value, fetchImpl));
+        }
+        if (kind === "rename") {
+          if (value.trim() === "") return;
+          return select(await postNoteRename(node.path, value, fetchImpl));
+        }
+        return select(await postNoteMove(node.path, value.trim(), fetchImpl));
+      };
       run().catch((err: unknown) => {
         setError(err instanceof Error ? err.message : String(err));
       });
     },
-    [onSelect, onReload, fetchImpl],
+    [pending, onSelect, onReload, fetchImpl],
   );
 
   const root = treeResult.state === "ready" ? treeResult.tree.root : null;
 
   return (
+    <>
     <aside
       className="panel panel--nav"
       data-testid="nav-panel"
@@ -522,6 +666,14 @@ function NavPanel({
         </div>
       </div>
     </aside>
+    {pending !== null && (
+      <PromptDialog
+        pending={pending}
+        onSubmit={submitPending}
+        onCancel={() => setPending(null)}
+      />
+    )}
+    </>
   );
 }
 
