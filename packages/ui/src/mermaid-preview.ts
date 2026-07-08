@@ -17,14 +17,25 @@ export async function renderMermaidPreviewForBlock(block: HTMLElement): Promise<
   if (!preview || !code || !pre) return;
 
   const text = code.textContent ?? "";
-  preview.replaceChildren();
 
   if (!MERMAID_LANGUAGES.has(language) || text.trim() === "") {
+    preview.replaceChildren();
     preview.hidden = true;
     delete preview.dataset.renderVersion;
+    delete preview.dataset.renderedSignature;
     return;
   }
 
+  // Idempotency guard: several triggers (the node view's own `schedulePreview`,
+  // the editor's `onCreate`/`onUpdate`, and the mount effect) can ask to render
+  // the same block. Re-rendering identical mermaid source is wasted work and, in
+  // tests, would consume a mocked one-shot result out of order. Skip when neither
+  // the language nor the source has changed since the last render was started.
+  const signature = `${language}\u0000${text}`;
+  if (preview.dataset.renderedSignature === signature) return;
+  preview.dataset.renderedSignature = signature;
+
+  preview.replaceChildren();
   preview.hidden = false;
   const version = String((Number(preview.dataset.renderVersion ?? "0") + 1) | 0);
   preview.dataset.renderVersion = version;

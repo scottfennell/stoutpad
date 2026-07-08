@@ -125,6 +125,17 @@ function createCodeBlockView({ node, updateAttributes }: NodeViewProps) {
   return {
     dom,
     contentDOM: code,
+    // The node view renders its own chrome (mermaid preview, header controls,
+    // line numbers) around the editable `code`. Writing the rendered SVG into
+    // `preview` mutates the node view's DOM, which ProseMirror's MutationObserver
+    // would otherwise treat as an edit — recreating the node view, which
+    // schedules another render, which mutates the DOM again: an infinite loop.
+    // Tell ProseMirror to ignore every mutation that isn't inside the editable
+    // `code` element so only real content edits redraw the node.
+    ignoreMutation(mutation: MutationRecord | { type: "selection"; target: Node }) {
+      if (mutation.type === "selection") return false;
+      return !code.contains(mutation.target);
+    },
     update(updatedNode: typeof node) {
       if (updatedNode.type !== currentNode.type) return false;
       currentNode = updatedNode;
