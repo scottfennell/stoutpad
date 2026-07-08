@@ -24,6 +24,8 @@ import {
   type ReactElement,
 } from "react";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
+import { common, createLowlight } from "lowlight";
+import { mermaidGrammar } from "lowlight-mermaid";
 import StarterKit from "@tiptap/starter-kit";
 import Image from "@tiptap/extension-image";
 import TaskItem from "@tiptap/extension-task-item";
@@ -35,16 +37,25 @@ import {
   wikiLinkQuery,
   type EditorProps,
 } from "./editor.js";
+import { MermaidCodeBlock } from "./CodeBlockLowlightMermaid.js";
+import { renderMermaidPreviews } from "./mermaid-preview.js";
 import {
   WikiLinkDecoration,
   refreshWikiLinkDecorations,
 } from "./wikilink-decoration.js";
 
+const lowlight = createLowlight(common);
+lowlight.register({ mermaid: mermaidGrammar });
+lowlight.registerAlias({ mermaid: ["mmd", "mindmap"] });
+
 const BASE_EXTENSIONS = [
-  StarterKit,
+  StarterKit.configure({ codeBlock: false }),
   TaskList,
   TaskItem.configure({ nested: true }),
   Image,
+  MermaidCodeBlock.configure({
+    lowlight,
+  }),
 ];
 
 /** Inject the wikilink styles once, the first time an editor mounts. */
@@ -182,6 +193,10 @@ export function TipTapEditor({
   const activeIndexRef = useRef(0);
   activeIndexRef.current = activeIndex;
   const pickRef = useRef<(title: string) => void>(() => undefined);
+  const renderPreviews = useCallback((nextEditor: Editor | null) => {
+    if (!nextEditor) return;
+    void renderMermaidPreviews(nextEditor.view.dom);
+  }, []);
 
   const refreshSuggest = useCallback((editor: Editor) => {
     const next = computeSuggestState(editor, titlesRef.current);
@@ -227,7 +242,9 @@ export function TipTapEditor({
     onUpdate: ({ editor }) => {
       onChange?.(tipTapDocToMarkdown(editor.getJSON()));
       refreshSuggest(editor);
+      renderPreviews(editor);
     },
+    onCreate: ({ editor }) => renderPreviews(editor),
     onSelectionUpdate: ({ editor }) => refreshSuggest(editor),
   });
 
@@ -253,11 +270,16 @@ export function TipTapEditor({
     if (tipTapDocToMarkdown(editor.getJSON()).trim() === markdown.trim()) return;
     editor.commands.setContent(markdownToTipTapDoc(markdown), { emitUpdate: false });
     setSuggest(null);
+    renderPreviews(editor);
   }, [editor, markdown]);
 
   useEffect(() => {
     editor?.setEditable(editable);
   }, [editor, editable]);
+
+  useEffect(() => {
+    renderPreviews(editor);
+  }, [editor, renderPreviews]);
 
   // Re-evaluate broken/resolved state when the resolver changes (e.g. tree load).
   useEffect(() => {

@@ -8,11 +8,11 @@
  * job in `@stout/ui`; this module is what the editor (and tests) parse against.
  *
  * Scope for this slice (see `docs/adr/0002-editor-seam-and-tiptap.md`): the block
- * grammar Stout's editor renders today — headings, paragraphs, bullet lists, and
- * GFM-style task lists (checkboxes) — plus a minimal inline grammar (`**bold**`,
- * `*italic*`, `` `code` ``, and `[[wikilinks]]`). Nested lists are flattened to a
- * single level and other constructs degrade to paragraphs; richer grammar lands
- * in later slices.
+ * grammar Stout's editor renders today — headings, paragraphs, fenced code
+ * blocks, bullet lists, and GFM-style task lists (checkboxes) — plus a minimal
+ * inline grammar (`**bold**`, `*italic*`, `` `code` ``, and `[[wikilinks]]`).
+ * Nested lists are flattened to a single level and other constructs degrade to
+ * paragraphs; richer grammar lands in later slices.
  */
 
 /** A heading level, `#` (1) through `######` (6). */
@@ -62,6 +62,7 @@ export interface TaskItem {
 export type MarkdownBlock =
   | { type: "heading"; level: HeadingLevel; text: string }
   | { type: "paragraph"; text: string }
+  | { type: "codeBlock"; language?: string; text: string }
   | { type: "bulletList"; items: string[] }
   | { type: "taskList"; items: TaskItem[] };
 
@@ -110,6 +111,7 @@ export interface ParsedFrontmatter {
 const HEADING = /^(#{1,6})\s+(.*)$/u;
 const TASK_ITEM = /^\s*[-*+]\s+\[([ xX])\]\s+(.*)$/u;
 const BULLET_ITEM = /^\s*[-*+]\s+(.*)$/u;
+const CODE_FENCE = /^(`{3,}|~{3,})([^`]*)$/u;
 
 /**
  * Parse a note's Markdown into the {@link MarkdownDocument} block model.
@@ -127,13 +129,18 @@ export function parseMarkdown(markdown: string): MarkdownDocument {
 
 /** Parse a frontmatter-free Markdown body into its ordered top-level blocks. */
 function parseBlocks(markdown: string): MarkdownBlock[] {
-  const lines = markdown.replace(/\r\n?/gu, "\n").split("\n");
+  const normalized = markdown.replace(/\r\n?/gu, "\n");
+  const lines = normalized.split("\n");
+  const hadTrailingNewline = normalized.endsWith("\n");
   const blocks: MarkdownBlock[] = [];
 
   let paragraph: string[] = [];
   let listKind: "task" | "bullet" | null = null;
   let taskItems: TaskItem[] = [];
   let bulletItems: string[] = [];
+  let codeFence: { marker: "`" | "~"; length: number; language?: string } | null =
+    null;
+  let codeLines: string[] = [];
 
   const flushParagraph = (): void => {
     if (paragraph.length > 0) {
@@ -157,8 +164,31 @@ function parseBlocks(markdown: string): MarkdownBlock[] {
   };
 
   for (const line of lines) {
+    if (codeFence) {
+      if (isClosingCodeFence(line, codeFence)) {
+        blocks.push({
+          type: "codeBlock",
+          language: codeFence.language,
+          text: codeLines.join("\n"),
+        });
+        codeFence = null;
+        codeLines = [];
+      } else {
+        codeLines.push(line);
+      }
+      continue;
+    }
+
     if (line.trim() === "") {
       flush();
+      continue;
+    }
+
+    const openingFence = parseOpeningCodeFence(line);
+    if (openingFence) {
+      flush();
+      codeFence = openingFence;
+      codeLines = [];
       continue;
     }
 
@@ -197,7 +227,37 @@ function parseBlocks(markdown: string): MarkdownBlock[] {
   }
 
   flush();
+  if (codeFence) {
+    if (hadTrailingNewline && codeLines.at(-1) === "") codeLines.pop();
+    blocks.push({
+      type: "codeBlock",
+      language: codeFence.language,
+      text: codeLines.join("\n"),
+    });
+  }
   return blocks;
+}
+
+function parseOpeningCodeFence(
+  line: string,
+): { marker: "`" | "~"; length: number; language?: string } | null {
+  const match = CODE_FENCE.exec(line);
+  if (!match) return null;
+  const fence = match[1];
+  const marker = fence[0] as "`" | "~";
+  const info = match[2].trim();
+  const language = info === "" ? undefined : info.split(/\s+/u, 1)[0];
+  return { marker, length: fence.length, language };
+}
+
+function isClosingCodeFence(
+  line: string,
+  fence: { marker: "`" | "~"; length: number },
+): boolean {
+  const trimmed = line.trim();
+  if (trimmed.length < fence.length) return false;
+  if (!trimmed.split("").every((char) => char === fence.marker)) return false;
+  return trimmed.length >= fence.length;
 }
 
 /**
@@ -436,6 +496,8 @@ function serializeBlock(block: MarkdownBlock): string {
       return `${"#".repeat(block.level)} ${block.text}`;
     case "paragraph":
       return block.text;
+    case "codeBlock":
+      return serializeCodeBlock(block.text, block.language);
     case "bulletList":
       return block.items.map((item) => `- ${item}`).join("\n");
     case "taskList":
@@ -454,6 +516,7 @@ function serializeBlock(block: MarkdownBlock): string {
  *
  * - ATX headings (`#`…`######` + a single space),
  * - one blank line between blocks,
+ * - fenced code blocks using backticks and an optional language tag,
  * - `-` bullet markers, `- [x]`/`- [ ]` GFM task markers,
  * - a single trailing newline (and the empty string for an empty note).
  *
@@ -480,6 +543,18 @@ export function serializeMarkdown(
 
   if (fence === "") return body.length > 0 ? `${body}\n` : "";
   return body.length > 0 ? `${fence}\n${body}\n` : fence;
+}
+
+function serializeCodeBlock(text: string, language?: string): string {
+  const fence = codeFenceFor(text);
+  const info = language ? `${fence}${language}` : fence;
+  return `${info}\n${text}\n${fence}`;
+}
+
+function codeFenceFor(text: string): string {
+  const matches = text.match(/`+/gu) ?? [];
+  const longest = matches.reduce((max, run) => Math.max(max, run.length), 0);
+  return "`".repeat(Math.max(3, longest + 1));
 }
 
 /** Serialize {@link Frontmatter} to a canonical `---`-fenced YAML block. */

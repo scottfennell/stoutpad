@@ -6,10 +6,30 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+
+const { mermaidRenderMock } = vi.hoisted(() => ({
+  mermaidRenderMock: vi.fn(async (_id: string, source: string) => ({
+    svg: `<svg data-source="${source.replace(/"/gu, "&quot;")}"></svg>`,
+  })),
+}));
+
+vi.mock("mermaid", () => ({
+  default: {
+    initialize: vi.fn(),
+    render: mermaidRenderMock,
+  },
+}));
+
 import { TipTapEditor, WikiLinkSuggestions } from "./TipTapEditor.js";
 import type { WikiLinkContext } from "./editor.js";
 
-afterEach(cleanup);
+afterEach(() => {
+  mermaidRenderMock.mockReset();
+  mermaidRenderMock.mockImplementation(async (_id: string, source: string) => ({
+    svg: `<svg data-source="${source.replace(/"/gu, "&quot;")}"></svg>`,
+  }));
+  cleanup();
+});
 
 const NOTE = `# Project Plan
 
@@ -50,6 +70,46 @@ describe("TipTapEditor", () => {
     // The stored repo-relative path is served from the hosted `/assets` mount.
     expect(img.getAttribute("src")).toBe("/assets/diagram.png");
     expect(img.getAttribute("alt")).toBe("Diagram");
+  });
+
+  it("renders fenced code blocks through the codeBlock extension", async () => {
+    render(<TipTapEditor markdown={"```mermaid\ngraph TD\n  A --> B\n```\n"} />);
+
+    await waitFor(() => {
+      const code = document.querySelector(".code-block pre code");
+      expect(code).toBeTruthy();
+      expect(code?.textContent).toContain("graph TD");
+    });
+
+    expect(document.querySelector(".code-block__language")?.textContent).toBe("mermaid");
+    expect(document.querySelector(".code-block__line-numbers")?.textContent).toBe("1\n2");
+
+    await waitFor(() => {
+      const preview = document.querySelector(".code-block__preview svg");
+      expect(preview).toBeTruthy();
+      expect(preview?.getAttribute("data-source")).toContain("graph TD");
+    });
+  });
+
+  it("replaces an old Mermaid error instead of stacking messages", async () => {
+    mermaidRenderMock
+      .mockRejectedValueOnce(new Error("bad diagram"))
+      .mockResolvedValueOnce({ svg: '<svg data-source="good"></svg>' });
+
+    const view = render(<TipTapEditor markdown={"```mermaid\ngraph TD\n  broken\n```\n"} />);
+
+    await waitFor(() => {
+      expect(document.querySelectorAll(".code-block__preview-error")).toHaveLength(1);
+    });
+
+    view.rerender(<TipTapEditor markdown={"```mermaid\ngraph TD\n  good\n```\n"} />);
+
+    await waitFor(() => {
+      expect(document.querySelectorAll(".code-block__preview-error")).toHaveLength(0);
+      const preview = document.querySelector(".code-block__preview svg");
+      expect(preview).toBeTruthy();
+      expect(preview?.getAttribute("data-source")).toBe("good");
+    });
   });
 });
 

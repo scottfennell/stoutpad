@@ -79,6 +79,25 @@ describe("tipTapDocToMarkdown round-trip", () => {
     };
     expect(tipTapDocToMarkdown(doc)).toBe("- [x] ship\n");
   });
+
+  it("round-trips fenced code blocks with a language tag", () => {
+    const markdown = "```mermaid\ngraph TD\n  A --> B\n```\n";
+    expect(tipTapDocToMarkdown(markdownToTipTapDoc(markdown))).toBe(markdown);
+  });
+
+  it("serializes a codeBlock node canonically", () => {
+    const doc: JSONContent = {
+      type: "doc",
+      content: [
+        {
+          type: "codeBlock",
+          attrs: { language: "ts" },
+          content: [{ type: "text", text: "const x = 1;" }],
+        },
+      ],
+    };
+    expect(tipTapDocToMarkdown(doc)).toBe("```ts\nconst x = 1;\n```\n");
+  });
 });
 
 describe("image bridge", () => {
