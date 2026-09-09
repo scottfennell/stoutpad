@@ -418,6 +418,10 @@ body {
 .note-header {
   padding: var(--panel-padding) var(--panel-padding) var(--gutter);
   border-bottom: 1px solid var(--color-outline-variant);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--color-surface-container-lowest);
 }
 .note-eyebrow {
   display: flex;
